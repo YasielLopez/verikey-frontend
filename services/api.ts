@@ -1,7 +1,6 @@
 import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
 
-// Your Flask backend URL (change this to your deployed URL when ready)
 const BASE_URL = 'http://10.0.0.176:5000';
 
 // Create axios instance
