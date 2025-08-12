@@ -1,12 +1,12 @@
-# 🔐 Verikey - Secure Identity Verification App
+# Verikey - Secure Identity Verification App
 
 ## Description
 
-Verikey is a secure identity-sharing application designed to help people safely verify one another without giving up control of their private information. Whether you're meeting someone from a dating app, conducting a marketplace transaction, or working with clients, Verikey allows you to share verified details—like your name, age, location, or a selfie—only when and how you choose.
+Verikey is a secure identity-sharing application designed to help people safely verify one another without giving up control of their private information. Whether you're meeting someone from a dating app, conducting a marketplace transaction, or working with clients, Verikey allows you to share verified details—like your name, age, location, and photos. 
 
 ### Key Features
 
-- **🆔 Identity Verification**: Verify your identity using government-issued ID and facial recognition
+- **🆔 Identity Verification**: Verify your identity using government-issued ID.
 - **🔑 Temporary Access Keys**: Share information through secure, temporary "verikeys" with limited viewing permissions
 - **📍 Location Verification**: Share city-level location to confirm proximity without revealing exact coordinates
 - **📸 Secure Photo Sharing**: In-app photos with screenshot protection and no download capability
@@ -68,7 +68,7 @@ face-recognition==1.3.0
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/verikey.git
+   git clone https://github.com/YasielLopez/verikey-backend.git
    cd verikey
    ```
 
@@ -250,12 +250,9 @@ python -m pytest tests/
 ## Future Enhancements
 
 - [ ] Background check integration
-- [ ] Verification tiers (Bronze, Silver, Gold)
-- [ ] API integrations with dating and marketplace apps
+- [ ] Verification tiers
 - [ ] Mutual verification (reciprocal key exchange)
 - [ ] Bulk verification requests
-- [ ] Advanced analytics dashboard
-- [ ] Mobile biometric authentication
 
 ## License
 
@@ -264,17 +261,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Support
 
 For questions or support, please contact:
-- Email: support@verikey.app
-- Documentation: [docs.verikey.app](https://docs.verikey.app)
-- Issues: [GitHub Issues](https://github.com/yourusername/verikey/issues)
-
-## Acknowledgments
-
-- Built with Flask and React Native
-- Powered by AWS cloud services
-- Face recognition using dlib and face-recognition libraries
-- Document OCR using Tesseract
-
----
-
-**🔐 Verikey** - Verify Without Oversharing
+- Email: hello@verikey.app
