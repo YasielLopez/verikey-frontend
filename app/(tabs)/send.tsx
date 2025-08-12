@@ -1,1102 +1,1086 @@
-import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { Camera, CameraView } from 'expo-camera';
-import React, { useRef, useState } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+import { KeysAPI, ProfileAPI, RequestsAPI } from '@/services/api';
+import { CameraView } from 'expo-camera';
+import * as FileSystem from 'expo-file-system';
+import * as Location from 'expo-location';
+import { router } from 'expo-router';
 import {
-    ActivityIndicator,
-    Alert,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    TextInput,
-    TouchableOpacity,
-    View
+  Bell,
+  Camera,
+  ChevronDown,
+  Loader2,
+  MapPin,
+  RefreshCw
+} from 'lucide-react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Alert,
+  Animated,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+const APP_PURPLE = '#D9B8F3';
+const ACCENT_GREEN = '#c2ff6b';
 
 type InformationType = 'fullname' | 'firstname' | 'age' | 'location' | 'selfie' | 'photo';
 
-interface FormData {
+interface InformationOption {
+  key: InformationType;
   label: string;
-  targetEmail: string;
-  informationTypes: InformationType[];
-  expiryHours: number;
-  viewsAllowed: number;
-  notes: string;
-  photos: string[];
 }
 
-export default function SendRequestScreen() {
-  const [mode, setMode] = useState<'send' | 'request'>('send');
-  const [formData, setFormData] = useState<FormData>({
-    label: '',
-    targetEmail: '',
-    informationTypes: [],
-    expiryHours: 0,
-    viewsAllowed: 0,
-    notes: '',
-    photos: [],
-  });
-  
-  // Modal states
-  const [showExpiryModal, setShowExpiryModal] = useState(false);
-  const [showViewsModal, setShowViewsModal] = useState(false);
-  const [showNotesModal, setShowNotesModal] = useState(false);
-  const [showCameraModal, setShowCameraModal] = useState(false);
-  const [cameraType, setCameraType] = useState<'selfie' | 'photo'>('selfie');
-  
-  // Form states
-  const [isShareableLink, setIsShareableLink] = useState(false);
-  const [recipientChip, setRecipientChip] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [noteText, setNoteText] = useState('');
-  const cameraRef = useRef(null);
+interface LocationData {
+  latitude: number;
+  longitude: number;
+  cityDisplay: string;
+}
 
-  // Information options exactly as in mockup
-  const informationOptions = [
-    { key: 'fullname' as InformationType, label: 'Full Name' },
-    { key: 'firstname' as InformationType, label: 'First Name Only' },
-    { key: 'age' as InformationType, label: 'Age' },
-    { key: 'location' as InformationType, label: 'General Current Location' },
-    { key: 'selfie' as InformationType, label: 'Current Selfie' },
-    { key: 'photo' as InformationType, label: 'Additional Photo' },
+export default function SendScreen() {
+  const { user } = useAuth();
+
+  const [mode, setMode] = useState<'send' | 'request'>('send');
+  const [loading, setLoading] = useState(true);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  // form
+  const [label, setLabel] = useState('');
+  const [targetEmail, setTargetEmail] = useState('');
+  const [informationTypes, setInformationTypes] = useState<InformationType[]>([]);
+  const [viewsAllowed, setViewsAllowed] = useState(0);
+  const [notes, setNotes] = useState('');
+
+  // recipients
+  const [recipientChip, setRecipientChip] = useState('');
+  const [recipientDisplayName, setRecipientDisplayName] = useState('');
+  const [isShareableLink, setIsShareableLink] = useState(false);
+  const [searchingUsers, setSearchingUsers] = useState(false);
+
+  // media & location
+  const [capturedPhotos, setCapturedPhotos] = useState<{[k: string]: string}>({});
+  const [capturedLocation, setCapturedLocation] = useState<LocationData | null>(null);
+  const [isCapturingLocation, setIsCapturingLocation] = useState(false);
+
+  // camera & preview
+  const [showCamera, setShowCamera] = useState(false);
+  const [cameraType, setCameraType] = useState<'selfie' | 'photo'>('selfie');
+  const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('front');
+  const cameraRef = useRef<CameraView>(null);
+
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+  const [previewUri, setPreviewUri] = useState<string>('');
+
+  // modal states
+  const [showViewsModal, setShowViewsModal] = useState(false);
+
+  // submit
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // skeleton
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+
+  const informationOptions: InformationOption[] = [
+    { key: 'fullname', label: 'Full Name' },
+    { key: 'firstname', label: 'First Name Only' },
+    { key: 'age', label: 'Age' },
+    { key: 'location', label: 'General Current Location' },
+    { key: 'selfie', label: 'Current Selfie' },
+    { key: 'photo', label: 'Additional Photo' },
   ];
 
-  // Template presets matching the mockup
   const templates = [
     { name: 'Minimal', types: ['firstname'] as InformationType[] },
     { name: 'Standard', types: ['firstname', 'age', 'location'] as InformationType[] },
     { name: 'Full Profile', types: ['fullname', 'age', 'location', 'selfie', 'photo'] as InformationType[] },
   ];
 
-  const toggleInformationType = (type: InformationType) => {
-    setFormData(prev => {
-      let newTypes = [...prev.informationTypes];
-      
-      // Handle mutual exclusivity for name fields
-      if (type === 'fullname' || type === 'firstname') {
-        const otherNameField = type === 'fullname' ? 'firstname' : 'fullname';
-        newTypes = newTypes.filter(t => t !== otherNameField);
-      }
-      
-      // Toggle current selection
-      if (newTypes.includes(type)) {
-        newTypes = newTypes.filter(t => t !== type);
-      } else {
-        newTypes.push(type);
-      }
-      
-      return { ...prev, informationTypes: newTypes };
-    });
+  useEffect(() => {
+    setTimeout(() => setLoading(false), 500);
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, { toValue: 1, duration: 1100, useNativeDriver: true }),
+        Animated.timing(shimmerAnim, { toValue: 0, duration: 1100, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+
+  // reset on mode change
+  useEffect(() => {
+    setLabel('');
+    setTargetEmail('');
+    setInformationTypes([]);
+    setViewsAllowed(0);
+    setNotes('');
+    setRecipientChip('');
+    setRecipientDisplayName('');
+    setIsShareableLink(false);
+    setCapturedPhotos({});
+    setCapturedLocation(null);
+  }, [mode]);
+
+  const calculateProgress = useCallback(() => {
+    let completed = 0;
+    let total = mode === 'request' ? 3 : 4;
+
+    if (label.trim().length > 0) completed++;
+    if (recipientChip.length > 0 || isShareableLink) completed++;
+    if (informationTypes.length > 0) completed++;
+    if (mode === 'send' && (viewsAllowed > 0 || isShareableLink)) completed++;
+
+    return Math.round((completed / total) * 100);
+  }, [mode, label, recipientChip, isShareableLink, informationTypes, viewsAllowed]);
+
+  const handleModeChange = (m: 'send' | 'request') => {
+    setMode(m);
+    setShowDropdown(false);
   };
 
   const applyTemplate = (template: typeof templates[0]) => {
-    setFormData(prev => ({
-      ...prev,
-      informationTypes: template.types
-    }));
+    setInformationTypes(template.types);
+    Object.keys(capturedPhotos).forEach(k => {
+      if (!template.types.includes(k as InformationType)) {
+        setCapturedPhotos(prev => {
+          const { [k]: _r, ...rest } = prev;
+          return rest;
+        });
+      }
+    });
+    if (!template.types.includes('location')) setCapturedLocation(null);
+    if (template.types.includes('location') && mode === 'send') {
+      setTimeout(() => captureCurrentLocation(), 50);
+    }
   };
 
-  const validateEmail = (email: string) => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const phoneRegex = /^\(\d{3}\) \d{3}-\d{4}$/;
-    const usernameRegex = /^[a-zA-Z0-9_.]+$/;
-    
-    return emailRegex.test(email) || phoneRegex.test(email) || 
-           (usernameRegex.test(email) && email.length >= 3 && !email.includes('@'));
+  const toggleInformationType = (type: InformationType) => {
+    let list = [...informationTypes];
+
+    if (type === 'fullname' || type === 'firstname') {
+      const other = type === 'fullname' ? 'firstname' : 'fullname';
+      list = list.filter(t => t !== other);
+    }
+
+    if (list.includes(type)) {
+      list = list.filter(t => t !== type);
+      if (type === 'selfie' || type === 'photo') {
+        setCapturedPhotos(prev => {
+          const { [type]: _r, ...rest } = prev;
+          return rest;
+        });
+      }
+      if (type === 'location') setCapturedLocation(null);
+    } else {
+      list.push(type);
+      if (type === 'location' && mode === 'send') {
+        captureCurrentLocation();
+      }
+    }
+    setInformationTypes(list);
   };
 
-  const handleRecipientInput = (text: string) => {
-    setFormData(prev => ({ ...prev, targetEmail: text }));
+  const captureCurrentLocation = async () => {
+    setIsCapturingLocation(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const { latitude, longitude } = loc.coords;
+      const reverse = await Location.reverseGeocodeAsync({ latitude, longitude });
+      let cityDisplay = 'Near your current location';
+      if (reverse.length > 0) {
+        const addr = reverse[0];
+        const city = addr.city || addr.subregion || 'Unknown City';
+        const state = addr.region || '';
+        cityDisplay = state ? `Near ${city}, ${state}` : `Near ${city}`;
+      }
+      setCapturedLocation({ latitude, longitude, cityDisplay });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsCapturingLocation(false);
+    }
   };
 
-  const createRecipientChip = () => {
-    if (validateEmail(formData.targetEmail)) {
-      setRecipientChip(formData.targetEmail);
-      setFormData(prev => ({ ...prev, targetEmail: '' }));
+  const handleRecipientLookup = async () => {
+    if (!targetEmail.trim()) return;
+    setSearchingUsers(true);
+    try {
+      const result = await ProfileAPI.lookupUser(targetEmail);
+      if (result) {
+        setRecipientChip(result.email || targetEmail);
+        setRecipientDisplayName(result.display_name || targetEmail);
+        setTargetEmail('');
+      } else {
+        Alert.alert('Not found', 'No user found with that username.');
+      }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'Failed to look up user.');
+    } finally {
+      setSearchingUsers(false);
     }
   };
 
   const removeRecipientChip = () => {
     setRecipientChip('');
+    setRecipientDisplayName('');
   };
 
   const toggleShareableLink = () => {
-    setIsShareableLink(!isShareableLink);
-    if (!isShareableLink) {
-      setFormData(prev => ({ ...prev, viewsAllowed: 1 }));
+    const next = !isShareableLink;
+    setIsShareableLink(next);
+    if (next) {
       setRecipientChip('shareable-link');
+      setRecipientDisplayName('Anyone with the link');
+      setViewsAllowed(1);
     } else {
-      setFormData(prev => ({ ...prev, viewsAllowed: 0 }));
       setRecipientChip('');
-    }
-  };
-
-  const openCamera = async (type: 'selfie' | 'photo') => {
-    const { status } = await Camera.requestCameraPermissionsAsync();
-    if (status === 'granted') {
-      setCameraType(type);
-      setShowCameraModal(true);
-    } else {
-      Alert.alert('Camera Permission', 'Camera access is required to take photos');
+      setRecipientDisplayName('');
+      setViewsAllowed(0);
     }
   };
 
   const takePicture = async () => {
-    if (cameraRef.current) {
-      try {
-        const photo = await cameraRef.current.takePictureAsync({
-          quality: 0.8,
-          base64: true,
-        });
-        
-        setFormData(prev => ({
-          ...prev,
-          photos: [...prev.photos, photo.base64]
-        }));
-        
-        setShowCameraModal(false);
-        Alert.alert('Success', `${cameraType === 'selfie' ? 'Selfie' : 'Photo'} captured successfully!`);
-      } catch (error) {
-        Alert.alert('Error', 'Failed to take picture');
-      }
+    if (!cameraRef.current) return;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, base64: false });
+      const base64 = await FileSystem.readAsStringAsync(photo.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const uri = `data:image/jpeg;base64,${base64}`;
+      setCapturedPhotos(prev => ({ ...prev, [cameraType]: uri }));
+      setShowCamera(false);
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'Failed to capture photo.');
     }
   };
 
   const isFormValid = () => {
-    const hasLabel = formData.label.trim().length > 0;
-    const hasRecipient = recipientChip.length > 0;
-    const hasInfo = formData.informationTypes.length > 0;
-    const hasExpiry = formData.expiryHours > 0;
-    const hasViews = formData.viewsAllowed > 0;
-    
+    const hasLabel = label.trim().length > 0;
+    const hasRecipient = recipientChip.length > 0 || isShareableLink;
+    const hasInfo = informationTypes.length > 0;
     if (mode === 'send') {
-      return hasLabel && hasRecipient && hasInfo && hasExpiry && hasViews;
-    } else {
-      return hasLabel && hasRecipient && hasInfo;
+      const hasViews = viewsAllowed > 0 || isShareableLink;
+      return hasLabel && hasRecipient && hasInfo && hasViews;
     }
+    return hasLabel && hasRecipient && hasInfo;
   };
 
-  const submitRequest = async () => {
-    if (!isFormValid()) {
-      Alert.alert('Form Incomplete', 'Please fill in all required fields');
-      return;
-    }
-
+  const submit = async () => {
+    if (!isFormValid()) return;
     setIsSubmitting(true);
-    
     try {
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate API call
-      
-      Alert.alert(
-        'Success',
-        `${mode === 'send' ? 'Key sent' : 'Request sent'} successfully!`,
-        [{
-          text: 'OK',
-          onPress: () => {
-            // Reset form
-            setFormData({
-              label: '',
-              targetEmail: '',
-              informationTypes: [],
-              expiryHours: 0,
-              viewsAllowed: 0,
-              notes: '',
-              photos: [],
-            });
-            setRecipientChip('');
-            setIsShareableLink(false);
-            setNoteText('');
-          }
-        }]
-      );
-    } catch (error) {
-      Alert.alert('Error', 'Failed to submit request. Please try again.');
+      if (mode === 'send') {
+        await KeysAPI.createShareableKey({
+          label,
+          recipient_email: isShareableLink ? null : recipientChip,
+          is_shareable_link: isShareableLink,
+          information_types: informationTypes,
+          views_allowed: isShareableLink ? 999 : viewsAllowed,
+          notes: notes.trim(),
+          location_data: capturedLocation,
+          selfie_data: capturedPhotos.selfie,
+          photo_data: capturedPhotos.photo,
+        });
+        Alert.alert('Success', 'Key created and sent.', [{ text: 'OK', onPress: () => router.push('/(tabs)') }]);
+      } else {
+        await RequestsAPI.createRequest({
+          label,
+          target_email: isShareableLink ? null : recipientChip,
+          is_shareable_link: isShareableLink,
+          information_types: informationTypes,
+          notes: notes.trim(),
+        });
+        Alert.alert('Success', 'Request sent.', [{ text: 'OK', onPress: () => router.push('/(tabs)/requests') }]);
+      }
+    } catch (e: any) {
+      console.error(e);
+      Alert.alert('Error', e?.response?.data?.error || 'Failed to submit.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  return (
-    <ThemedView style={styles.container}>
-      <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>
-          {mode === 'send' ? 'Send Key' : 'Request Key'}
-        </ThemedText>
-        <View style={styles.progressBar} />
-      </View>
+  const Toggle = ({ isOn, onToggle }: { isOn: boolean; onToggle: () => void }) => (
+    <TouchableOpacity onPress={onToggle} activeOpacity={0.9} style={[styles.toggle, isOn && styles.toggleActive]}>
+      <View style={[styles.toggleKnob, isOn && styles.toggleKnobActive]} />
+    </TouchableOpacity>
+  );
 
-      <KeyboardAvoidingView 
-        style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <ScrollView 
-          style={styles.scrollView}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-        >
-          {/* Mode Toggle */}
-          <View style={styles.modeToggle}>
-            <View style={[
-              styles.modeToggleSlider,
-              mode === 'request' && styles.modeToggleSliderRequest
-            ]} />
-            <TouchableOpacity
-              style={styles.modeToggleOption}
-              onPress={() => setMode('send')}
-            >
-              <ThemedText style={[
-                styles.modeToggleText,
-                mode === 'send' && styles.modeToggleTextActive
-              ]}>
-                Send
-              </ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modeToggleOption}
-              onPress={() => setMode('request')}
-            >
-              <ThemedText style={[
-                styles.modeToggleText,
-                mode === 'request' && styles.modeToggleTextActive
-              ]}>
-                Request
-              </ThemedText>
-            </TouchableOpacity>
+  const Skeleton = () => (
+    <Animated.View
+      style={[
+        styles.skeletonCard,
+        { opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.6] }) }
+      ]}
+    >
+      <View style={styles.skeletonTitle} />
+      <View style={styles.skeletonInput} />
+      <View style={styles.skeletonRow}>
+        <View style={styles.skeletonBtn} />
+        <View style={styles.skeletonBtn} />
+      </View>
+    </Animated.View>
+  );
+
+  if (loading) {
+    return (
+      <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000' }}>
+        <StatusBar barStyle="light-content" backgroundColor="#000" />
+        <ThemedView style={styles.container}>
+          <View style={styles.header}>
+            <View style={styles.headerContent}>
+              <View style={styles.dropdownSection}>
+                <View style={[styles.dropdownButton, styles.dropdownOffset]}>
+                  <Text style={styles.headerTitle}>Send Key</Text>
+                  <ChevronDown size={20} color="#9ca3af" />
+                </View>
+              </View>
+              <TouchableOpacity style={styles.headerIconButton} onPress={() => {}}>
+                <Bell size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {/* Send Mode Content */}
-          {mode === 'send' && (
-            <>
-              {/* Label and Recipient Section */}
-              <View style={styles.formSection}>
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Label</ThemedText>
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Give this key a name"
-                    value={formData.label}
-                    onChangeText={(text) => setFormData(prev => ({ ...prev, label: text }))}
+          <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 14 }}>
+            {[1,2,3].map(i => <Skeleton key={i} />)}
+          </ScrollView>
+        </ThemedView>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000' }}>
+      <StatusBar barStyle="light-content" backgroundColor="#000" />
+      <ThemedView style={styles.container}>
+        <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.headerContent}>
+              <View style={styles.dropdownSection}>
+                <TouchableOpacity
+                  onPress={() => setShowDropdown(!showDropdown)}
+                  style={[styles.dropdownButton, styles.dropdownOffset]}
+                  activeOpacity={1}
+                >
+                  <Text style={styles.headerTitle}>
+                    {mode === 'send' ? 'Send Key' : 'Request Key'}
+                  </Text>
+                  <ChevronDown
+                    size={20}
+                    color="#9ca3af"
+                    style={{ transform: [{ rotate: showDropdown ? '180deg' : '0deg' }] }}
                   />
-                </View>
-                
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Send To</ThemedText>
-                  {recipientChip && !isShareableLink ? (
-                    <View style={styles.recipientChip}>
-                      <ThemedText style={styles.chipText}>{recipientChip}</ThemedText>
-                      <TouchableOpacity onPress={removeRecipientChip} style={styles.removeBtn}>
-                        <ThemedText style={styles.removeBtnText}>×</ThemedText>
-                      </TouchableOpacity>
-                    </View>
-                  ) : !isShareableLink ? (
-                    <TextInput
-                      style={styles.textInput}
-                      placeholder="Email, phone number, or username"
-                      value={formData.targetEmail}
-                      onChangeText={handleRecipientInput}
-                      onBlur={createRecipientChip}
-                      keyboardType="email-address"
-                      autoCapitalize="none"
-                    />
-                  ) : null}
-                  
-                  <View style={styles.generateLink}>
-                    <TouchableOpacity onPress={toggleShareableLink}>
-                      <ThemedText style={[
-                        styles.generateLinkText,
-                        isShareableLink && styles.generateLinkTextClicked
-                      ]}>
-                        {isShareableLink ? 'Link Generated' : 'Or Generate Shareable Link'}
-                      </ThemedText>
+                </TouchableOpacity>
+
+                {showDropdown && (
+                  <View style={styles.dropdown}>
+                    <TouchableOpacity
+                      onPress={() => handleModeChange('send')}
+                      style={[styles.dropdownItem, mode === 'send' && styles.dropdownItemActive]}
+                      activeOpacity={1}
+                    >
+                      <Text style={[styles.dropdownItemText, mode === 'send' && styles.dropdownItemTextActive]}>
+                        Send Key
+                      </Text>
+                    </TouchableOpacity>
+
+                    <View style={styles.dropdownDivider} />
+
+                    <TouchableOpacity
+                      onPress={() => handleModeChange('request')}
+                      style={[styles.dropdownItem, mode === 'request' && styles.dropdownItemActive]}
+                      activeOpacity={1}
+                    >
+                      <Text style={[styles.dropdownItemText, mode === 'request' && styles.dropdownItemTextActive]}>
+                        Request Key
+                      </Text>
                     </TouchableOpacity>
                   </View>
-                </View>
+                )}
               </View>
 
-              {/* Templates and Information Section */}
-              <View style={styles.formSection}>
-                <ThemedText style={styles.label}>Quick Templates</ThemedText>
-                <View style={styles.templates}>
-                  {templates.map((template) => (
-                    <TouchableOpacity
-                      key={template.name}
-                      style={styles.templateBtn}
-                      onPress={() => applyTemplate(template)}
-                    >
-                      <ThemedText style={styles.templateBtnText}>{template.name}</ThemedText>
+              <TouchableOpacity
+                style={styles.headerIconButton}
+                onPress={() => {}}
+                accessibilityRole="button"
+                accessibilityLabel="Notifications"
+              >
+                <Bell size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Progress bar */}
+          <View style={styles.progressBarContainer}>
+            <View style={styles.progressBar}>
+              <View style={[styles.progressFill, { width: `${calculateProgress()}%` }]} />
+            </View>
+          </View>
+
+          {/* Content */}
+          <View style={styles.content}>
+            <ScrollView
+              contentContainerStyle={{ paddingTop: 30, paddingHorizontal: 20, paddingBottom: 140 }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Title */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Title</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Brief description (max 30 chars)"
+                  placeholderTextColor="#9ca3af"
+                  value={label}
+                  onChangeText={setLabel}
+                  maxLength={30}
+                />
+              </View>
+
+              {/* Recipient */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>{mode === 'send' ? 'Send To' : 'Request From'}</Text>
+
+                {recipientChip && !isShareableLink ? (
+                  <View style={styles.recipientChipWide}>
+                    <Text style={styles.recipientChipText} numberOfLines={1}>{recipientDisplayName}</Text>
+                    <TouchableOpacity onPress={removeRecipientChip} hitSlop={{ top: 10, left: 10, right: 10, bottom: 10 }}>
+                      <Text style={styles.chipX}>×</Text>
                     </TouchableOpacity>
-                  ))}
-                </View>
-                
-                <View style={styles.toggleList}>
-                  {informationOptions.map((option) => (
-                    <View key={option.key}>
-                      <TouchableOpacity
-                        style={[
-                          styles.toggleItem,
-                          formData.informationTypes.includes(option.key) && styles.toggleItemActive
-                        ]}
-                        onPress={() => toggleInformationType(option.key)}
-                      >
-                        <ThemedText style={styles.toggleItemText}>{option.label}</ThemedText>
-                        <View style={[
-                          styles.toggleSwitch,
-                          formData.informationTypes.includes(option.key) && styles.toggleSwitchActive
-                        ]}>
-                          <View style={[
-                            styles.toggleSwitchKnob,
-                            formData.informationTypes.includes(option.key) && styles.toggleSwitchKnobActive
-                          ]} />
-                        </View>
-                      </TouchableOpacity>
-                      
-                      {/* Photo buttons for selfie/photo toggles */}
-                      {formData.informationTypes.includes(option.key) && (option.key === 'selfie' || option.key === 'photo') && (
-                        <TouchableOpacity
-                          style={styles.photoButton}
-                          onPress={() => openCamera(option.key)}
-                        >
-                          <ThemedText style={styles.photoButtonText}>Take Photo</ThemedText>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  ))}
-                </View>
-              </View>
-
-              {/* Settings Section */}
-              <View style={styles.formSection}>
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Expires In</ThemedText>
-                  <TouchableOpacity
-                    style={[
-                      styles.selectorButton,
-                      formData.expiryHours > 0 && styles.selectorButtonSelected
-                    ]}
-                    onPress={() => setShowExpiryModal(true)}
-                  >
-                    <ThemedText style={styles.selectorButtonText}>
-                      {formData.expiryHours > 0 ? 
-                        (formData.expiryHours < 1 ? `${formData.expiryHours * 60} minutes` : 
-                         formData.expiryHours === 1 ? '1 hour' : `${formData.expiryHours} hours`) : 
-                        'Choose Expiry'
-                      }
-                    </ThemedText>
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Views Allowed</ThemedText>
-                  <TouchableOpacity
-                    style={[
-                      styles.selectorButton,
-                      formData.viewsAllowed > 0 && styles.selectorButtonSelected,
-                      isShareableLink && styles.selectorButtonDisabled
-                    ]}
-                    onPress={() => !isShareableLink && setShowViewsModal(true)}
-                    disabled={isShareableLink}
-                  >
-                    <ThemedText style={[
-                      styles.selectorButtonText,
-                      isShareableLink && styles.selectorButtonTextDisabled
-                    ]}>
-                      {formData.viewsAllowed > 0 ? 
-                        (formData.viewsAllowed === 999 ? 'Unlimited Views' : `${formData.viewsAllowed} View${formData.viewsAllowed > 1 ? 's' : ''}`) : 
-                        'Choose Views'
-                      }
-                    </ThemedText>
-                  </TouchableOpacity>
-                  {isShareableLink && (
-                    <ThemedText style={styles.disclaimer}>
-                      For security, links are limited to only one view.
-                    </ThemedText>
-                  )}
-                </View>
-
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Include Note (Optional)</ThemedText>
-                  <TouchableOpacity
-                    style={[
-                      styles.selectorButton,
-                      formData.notes.length > 0 && styles.selectorButtonSelected
-                    ]}
-                    onPress={() => setShowNotesModal(true)}
-                  >
-                    <ThemedText style={styles.selectorButtonText}>
-                      {formData.notes.length > 0 ? 'Edit Note' : 'Add Note'}
-                    </ThemedText>
-                  </TouchableOpacity>
-                  {formData.notes.length > 0 && (
-                    <View style={styles.notePreview}>
-                      <ThemedText style={styles.notePreviewText} numberOfLines={2}>
-                        {formData.notes}
-                      </ThemedText>
-                    </View>
-                  )}
-                </View>
-              </View>
-            </>
-          )}
-
-          {/* Request Mode Content */}
-          {mode === 'request' && (
-            <>
-              {/* Label and Recipient Section */}
-              <View style={styles.formSection}>
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Label</ThemedText>
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Give this request a name"
-                    value={formData.label}
-                    onChangeText={(text) => setFormData(prev => ({ ...prev, label: text }))}
-                  />
-                </View>
-                
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Request From</ThemedText>
-                  {recipientChip ? (
-                    <View style={styles.recipientChip}>
-                      <ThemedText style={styles.chipText}>{recipientChip}</ThemedText>
-                      <TouchableOpacity onPress={removeRecipientChip} style={styles.removeBtn}>
-                        <ThemedText style={styles.removeBtnText}>×</ThemedText>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
+                  </View>
+                ) : !isShareableLink ? (
+                  <>
                     <TextInput
-                      style={styles.textInput}
-                      placeholder="Email, phone number, or username"
-                      value={formData.targetEmail}
-                      onChangeText={handleRecipientInput}
-                      onBlur={createRecipientChip}
-                      keyboardType="email-address"
+                      style={[styles.input, { marginBottom: 12 }]}
+                      placeholder="Enter a username"
+                      placeholderTextColor="#9ca3af"
+                      value={targetEmail}
+                      onChangeText={setTargetEmail}
+                      onSubmitEditing={handleRecipientLookup}
                       autoCapitalize="none"
+                      autoCorrect={false}
                     />
-                  )}
-                </View>
-              </View>
-
-              {/* Information Section */}
-              <View style={styles.formSection}>
-                <ThemedText style={styles.label}>Information to Request</ThemedText>
-                <View style={styles.toggleList}>
-                  {informationOptions.map((option) => (
-                    <TouchableOpacity
-                      key={option.key}
-                      style={[
-                        styles.toggleItem,
-                        formData.informationTypes.includes(option.key) && styles.toggleItemActive
-                      ]}
-                      onPress={() => toggleInformationType(option.key)}
-                    >
-                      <ThemedText style={styles.toggleItemText}>{option.label}</ThemedText>
-                      <View style={[
-                        styles.toggleSwitch,
-                        formData.informationTypes.includes(option.key) && styles.toggleSwitchActive
-                      ]}>
-                        <View style={[
-                          styles.toggleSwitchKnob,
-                          formData.informationTypes.includes(option.key) && styles.toggleSwitchKnobActive
-                        ]} />
+                    {searchingUsers && (
+                      <View style={styles.inlineInfo}>
+                        <Loader2 size={16} color="#6b7280" />
+                        <Text style={styles.inlineInfoText}>Looking up user...</Text>
                       </View>
-                    </TouchableOpacity>
-                  ))}
+                    )}
+                  </>
+                ) : null}
+
+                <TouchableOpacity
+                  onPress={toggleShareableLink}
+                  style={[
+                    styles.fullWidthButton,
+                    isShareableLink ? styles.fullWidthButtonActive : styles.fullWidthButtonNeutral
+                  ]}
+                  activeOpacity={0.9}
+                >
+                  <Text style={[styles.fullWidthButtonText, isShareableLink && styles.fullWidthButtonTextActive]}>
+                    {isShareableLink ? 'Shareable Link Mode' : 'Or Generate Shareable Link'}
+                  </Text>
+                </TouchableOpacity>
+                
+                {isShareableLink && (
+                  <Text style={styles.shareableLinkDescription}>
+                    {mode === 'send' 
+                      ? 'Generate a link that you can send to anyone to share your information.'
+                      : 'Generate a link that you can send to anyone to request their information.'}
+                  </Text>
+                )}
+              </View>
+
+              {/* Information */}
+              <View style={styles.card}>
+                <View style={{ gap: 12 }}>
+                  {informationOptions.map(opt => {
+                    const selected = informationTypes.includes(opt.key);
+                    return (
+                      <View key={opt.key}>
+                        <View style={styles.infoRow}>
+                          <View style={{ flex: 1, marginRight: 12 }}>
+                            <Text style={styles.infoRowText}>{opt.label}</Text>
+                            {opt.key === 'location' && mode === 'send' && (
+                              <Text style={styles.privacyNote}>Exact coordinates not shared for privacy</Text>
+                            )}
+                          </View>
+                          <Toggle
+                            isOn={selected}
+                            onToggle={() => toggleInformationType(opt.key)}
+                          />
+                        </View>
+
+                        {selected && mode === 'send' && (opt.key === 'location' || opt.key === 'selfie' || opt.key === 'photo') && (
+                          <View style={{ marginTop: 10 }}>
+                            {opt.key === 'location' && (
+                              capturedLocation ? (
+                                <View style={styles.locationCaptured}>
+                                  <View style={styles.locationHeader}>
+                                    <MapPin size={22} color="#111827" />
+                                    <Text style={styles.locationCapturedText} numberOfLines={2}>
+                                      {capturedLocation.cityDisplay}
+                                    </Text>
+                                  </View>
+                                  <TouchableOpacity
+                                    onPress={captureCurrentLocation}
+                                    disabled={isCapturingLocation}
+                                    style={styles.locationUpdateBtn}
+                                    activeOpacity={0.9}
+                                  >
+                                    <Text style={styles.locationUpdateBtnText}>
+                                      {isCapturingLocation ? 'Updating...' : 'Update'}
+                                    </Text>
+                                  </TouchableOpacity>
+                                </View>
+                              ) : (
+                                <Text style={styles.locationGeneratingText}>
+                                  {isCapturingLocation ? 'Generating current location...' : 'Generating current location...'}
+                                </Text>
+                              )
+                            )}
+
+                            {(opt.key === 'selfie' || opt.key === 'photo') && (
+                              capturedPhotos[opt.key] ? (
+                                <View style={styles.photoCaptured}>
+                                  <View style={styles.photoCapturedHeader}>
+                                    <Camera size={22} color="#111827" />
+                                    <Text style={styles.photoCapturedHeaderText}>
+                                      {opt.key === 'selfie' ? 'Selfie captured' : 'Photo captured'}
+                                    </Text>
+                                  </View>
+
+                                  <View style={styles.photoCapturedActions}>
+                                    <TouchableOpacity
+                                      style={styles.whitePillBtn}
+                                      onPress={() => {
+                                        setPreviewUri(capturedPhotos[opt.key]);
+                                        setShowPhotoPreview(true);
+                                      }}
+                                    >
+                                      <Text style={styles.whitePillBtnText}>Preview</Text>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                      style={styles.whitePillBtn}
+                                      onPress={() => {
+                                        setCameraType(opt.key);
+                                        setCameraFacing(opt.key === 'selfie' ? 'front' : 'back');
+                                        setShowCamera(true);
+                                      }}
+                                    >
+                                      <Text style={styles.whitePillBtnText}>Retake</Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                </View>
+                              ) : (
+                                <TouchableOpacity
+                                  style={styles.takePhotoBtn}
+                                  onPress={() => {
+                                    setCameraType(opt.key);
+                                    setCameraFacing(opt.key === 'selfie' ? 'front' : 'back');
+                                    setShowCamera(true);
+                                  }}
+                                  activeOpacity={0.9}
+                                >
+                                  <Camera size={18} color="#111827" />
+                                  <Text style={styles.takePhotoBtnText}>
+                                    {opt.key === 'selfie' ? 'Take Selfie' : 'Take Photo'}
+                                  </Text>
+                                </TouchableOpacity>
+                              )
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
               </View>
 
-              {/* Note Section */}
-              <View style={styles.formSection}>
-                <View style={styles.formGroup}>
-                  <ThemedText style={styles.label}>Include Note (Optional)</ThemedText>
+              {/* Views Allowed */}
+              {mode === 'send' && !isShareableLink && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Views Allowed</Text>
+                  
                   <TouchableOpacity
-                    style={[
-                      styles.selectorButton,
-                      formData.notes.length > 0 && styles.selectorButtonSelected
-                    ]}
-                    onPress={() => setShowNotesModal(true)}
+                    style={styles.viewsSelector}
+                    onPress={() => setShowViewsModal(true)}
+                    activeOpacity={0.9}
                   >
-                    <ThemedText style={styles.selectorButtonText}>
-                      {formData.notes.length > 0 ? 'Edit Note' : 'Add Note'}
-                    </ThemedText>
+                    <Text style={styles.viewsSelectorText}>
+                      {viewsAllowed === 0 ? 'Select views' : viewsAllowed === 999 ? 'Unlimited views' : `${viewsAllowed} ${viewsAllowed === 1 ? 'view' : 'views'}`}
+                    </Text>
+                    <ChevronDown size={20} color="#6b7280" />
                   </TouchableOpacity>
-                  {formData.notes.length > 0 && (
-                    <View style={styles.notePreview}>
-                      <ThemedText style={styles.notePreviewText} numberOfLines={2}>
-                        {formData.notes}
-                      </ThemedText>
-                    </View>
+                </View>
+              )}
+
+              {/* Notes */}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Include Note (Optional)</Text>
+                <TextInput
+                  style={[styles.input, styles.notesInput]}
+                  placeholder="Add a message with your key"
+                  placeholderTextColor="#9ca3af"
+                  value={notes}
+                  onChangeText={setNotes}
+                  multiline
+                  numberOfLines={5}
+                  maxLength={200}
+                  textAlignVertical="top"
+                />
+                <Text style={styles.notesCount}>{notes.length}/200</Text>
+              </View>
+
+              {/* Submit Button */}
+              <TouchableOpacity
+                onPress={submit}
+                disabled={!isFormValid() || isSubmitting}
+                style={[
+                  styles.submitButton,
+                  (!isFormValid() || isSubmitting) && styles.submitButtonDisabled
+                ]}
+                activeOpacity={0.95}
+              >
+                <Text style={[
+                  styles.submitButtonText,
+                  (!isFormValid() || isSubmitting) && styles.submitButtonTextDisabled
+                ]}>
+                  {mode === 'send' ? 'Create and Send Key' : 'Send Request'}
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+
+        {/* Views Modal */}
+        <Modal visible={showViewsModal} transparent animationType="fade" onRequestClose={() => setShowViewsModal(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.viewsModalCard}>
+              <Text style={styles.viewsModalTitle}>Select Views Allowed</Text>
+              
+              <View style={styles.viewsModalOptions}>
+                {[1, 2, 3, 5, 'Unlimited'].map(num => (
+                  <TouchableOpacity
+                    key={num}
+                    style={[
+                      styles.viewsModalOption,
+                      (num === 'Unlimited' ? viewsAllowed === 999 : viewsAllowed === num) && styles.viewsModalOptionActive
+                    ]}
+                    onPress={() => {
+                      setViewsAllowed(num === 'Unlimited' ? 999 : num);
+                      setShowViewsModal(false);
+                    }}
+                    activeOpacity={0.9}
+                  >
+                    <Text style={[
+                      styles.viewsModalOptionText,
+                      (num === 'Unlimited' ? viewsAllowed === 999 : viewsAllowed === num) && styles.viewsModalOptionTextActive
+                    ]}>
+                      {num === 'Unlimited' ? 'Unlimited' : `${num} ${num === 1 ? 'view' : 'views'}`}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              
+              <TouchableOpacity
+                style={styles.viewsModalCancel}
+                onPress={() => setShowViewsModal(false)}
+              >
+                <Text style={styles.viewsModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Camera Fullscreen */}
+        <Modal visible={showCamera} animationType="slide" presentationStyle="fullScreen">
+          <View style={styles.cameraContainer}>
+            <CameraView ref={cameraRef} style={styles.camera} facing={cameraFacing}>
+              <View style={styles.cameraOverlay}>
+                <TouchableOpacity style={styles.cameraClose} onPress={() => setShowCamera(false)}>
+                  <Text style={{ color: '#fff', fontSize: 22 }}>×</Text>
+                </TouchableOpacity>
+
+                <View style={styles.cameraBottomControls}>
+                  <TouchableOpacity style={styles.capturePhotoButtonCamera} onPress={takePicture}>
+                    <View style={styles.capturePhotoButtonInner} />
+                  </TouchableOpacity>
+                  
+                  {cameraType === 'photo' && (
+                    <TouchableOpacity
+                      style={styles.cameraFlipButton}
+                      onPress={() => setCameraFacing(prev => (prev === 'front' ? 'back' : 'front'))}
+                    >
+                      <RefreshCw size={24} color="#fff" />
+                    </TouchableOpacity>
                   )}
                 </View>
               </View>
-            </>
-          )}
+            </CameraView>
+          </View>
+        </Modal>
 
-          {/* Submit Button */}
-          <TouchableOpacity
-            style={[
-              styles.submitButton,
-              !isFormValid() && styles.submitButtonDisabled
-            ]}
-            onPress={submitRequest}
-            disabled={!isFormValid() || isSubmitting}
-          >
-            {isSubmitting ? (
-              <ActivityIndicator color="#1f2937" />
-            ) : (
-              <ThemedText style={styles.submitButtonText}>
-                {mode === 'send' ? 'Create and Send Key' : 'Send Request'}
-              </ThemedText>
-            )}
-          </TouchableOpacity>
-        </ScrollView>
-      </KeyboardAvoidingView>
+        {/* Preview Modal */}
+        <Modal visible={showPhotoPreview} transparent animationType="fade" onRequestClose={() => setShowPhotoPreview(false)}>
+          <View style={styles.previewOverlay}>
+            <View style={styles.previewCard}>
+              <View style={styles.previewMedia}>
+                {previewUri ? (
+                  <View style={{ flex: 1, borderRadius: 16, overflow: 'hidden' }}>
+                    <View style={{ flex: 1, backgroundColor: '#f3f4f6' }}>
+                      <Text style={{ display: 'none' }}>{/* keep RN happy */}</Text>
+                    </View>
+                  </View>
+                ) : (
+                  <View style={styles.previewEmpty}>
+                    <Camera size={40} color="#111827" />
+                    <Text style={styles.previewEmptyText}>No photo to preview</Text>
+                  </View>
+                )}
+              </View>
 
-      {/* Camera Modal */}
-      <Modal
-        visible={showCameraModal}
-        animationType="slide"
-        presentationStyle="fullScreen"
-      >
-        <ThemedView style={styles.cameraContainer}>
-          <CameraView
-            style={styles.camera}
-            facing="front"
-            ref={cameraRef}
-          />
-          <ThemedView style={styles.cameraControls}>
-            <TouchableOpacity
-              style={styles.cameraButton}
-              onPress={() => setShowCameraModal(false)}
-            >
-              <ThemedText style={styles.cameraButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.captureButton}
-              onPress={takePicture}
-            >
-              <ThemedText style={styles.captureButtonText}>📸</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-
-      {/* Expiry Modal */}
-      <Modal visible={showExpiryModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Select Expiration</ThemedText>
-            {[0.25, 0.5, 1, 2, 6, 12, 24].map((hours) => (
-              <TouchableOpacity
-                key={hours}
-                style={styles.modalOption}
-                onPress={() => {
-                  setFormData(prev => ({ ...prev, expiryHours: hours }));
-                  setShowExpiryModal(false);
-                }}
-              >
-                <ThemedText style={styles.modalOptionText}>
-                  {hours < 1 ? `${hours * 60} minutes` : 
-                   hours === 1 ? '1 hour' : `${hours} hours`}
-                </ThemedText>
+              <TouchableOpacity style={styles.previewClose} onPress={() => setShowPhotoPreview(false)}>
+                <Text style={styles.previewCloseText}>Close</Text>
               </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              style={styles.modalCancel}
-              onPress={() => setShowExpiryModal(false)}
-            >
-              <ThemedText style={styles.modalCancelText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-
-      {/* Views Modal */}
-      <Modal visible={showViewsModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Views Allowed</ThemedText>
-            {[1, 2, 3, 999].map((views) => (
-              <TouchableOpacity
-                key={views}
-                style={styles.modalOption}
-                onPress={() => {
-                  setFormData(prev => ({ ...prev, viewsAllowed: views }));
-                  setShowViewsModal(false);
-                }}
-              >
-                <ThemedText style={styles.modalOptionText}>
-                  {views === 999 ? 'Unlimited' : `${views} View${views > 1 ? 's' : ''}`}
-                </ThemedText>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity
-              style={styles.modalCancel}
-              onPress={() => setShowViewsModal(false)}
-            >
-              <ThemedText style={styles.modalCancelText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-
-      {/* Notes Modal */}
-      <Modal visible={showNotesModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Add Note</ThemedText>
-            <TextInput
-              style={styles.notesInput}
-              placeholder={mode === 'send' ? 
-                "Add a personal message with your key..." : 
-                "Add a personal message to your request..."
-              }
-              value={noteText}
-              onChangeText={setNoteText}
-              multiline
-              numberOfLines={4}
-            />
-            <TouchableOpacity
-              style={styles.modalSave}
-              onPress={() => {
-                setFormData(prev => ({ ...prev, notes: noteText }));
-                setShowNotesModal(false);
-              }}
-            >
-              <ThemedText style={styles.modalSaveText}>Save Note</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modalCancel}
-              onPress={() => {
-                setNoteText('');
-                setFormData(prev => ({ ...prev, notes: '' }));
-                setShowNotesModal(false);
-              }}
-            >
-              <ThemedText style={styles.modalCancelText}>Clear Note</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.modalCancel}
-              onPress={() => setShowNotesModal(false)}
-            >
-              <ThemedText style={styles.modalCancelText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-    </ThemedView>
+            </View>
+          </View>
+        </Modal>
+      </ThemedView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fdfdfd',
-  },
-  header: {
-    backgroundColor: '#b5ead7',
-    paddingVertical: 20,
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-  },
+  container: { flex: 1, backgroundColor: '#000' },
+
+  /* header */
+  header: { backgroundColor: '#000', paddingTop: 10, paddingBottom: 24, paddingHorizontal: 20 },
+  headerContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  headerIconButton: { padding: 6 },
+  dropdownSection: { flex: 1, marginRight: 16 },
+  dropdownOffset: { paddingLeft: 20 },
+  dropdownButton: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerTitle: {
     fontSize: 20,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontWeight: '400',
+    color: '#fff',
+    fontFamily: 'Poppins-Regular',
   },
-  progressBar: {
+  dropdown: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    height: 3,
-    backgroundColor: '#FFD66B',
-    width: '0%',
-  },
-  keyboardView: {
-    flex: 1,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingBottom: 100,
-  },
-  modeToggle: {
-    backgroundColor: '#e9f9f3',
-    borderRadius: 999,
-    padding: 4,
-    flexDirection: 'row',
-    position: 'relative',
-    marginHorizontal: 20,
-    marginVertical: 20,
-  },
-modeToggleSlider: {
-  position: 'absolute',
-  top: 4,
-  left: 4,
-  right: '50%', 
-  height: 44,
-  backgroundColor: '#b5eac1',
-  borderRadius: 999,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.1,
-  shadowRadius: 3,
-  elevation: 2,
-  zIndex: 1,
-},
-modeToggleSliderRequest: {
-  left: '50%',  
-  right: 4,       
-},
-  modeToggleOption: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 999,
-    zIndex: 2,
-  },
-modeToggleText: {
-  fontSize: 14,
-  fontWeight: '700',
-  color: '#6b7280',
-},
-modeToggleTextActive: {
-  color: '#1f2937',
-  fontWeight: '700',
-},
-  formSection: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-    marginHorizontal: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  formGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    color: '#1f2937',
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  textInput: {
-    width: '100%',
-    padding: 12,
-    fontSize: 16,
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    backgroundColor: '#ffffff',
-  },
-  recipientChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#d1d5db',
-    color: '#1f2937',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    alignSelf: 'flex-start',
-    marginBottom: 12,
-  },
-  chipText: {
-    fontSize: 14,
-    color: '#1f2937',
-    marginRight: 8,
-  },
-  removeBtn: {
-    backgroundColor: 'transparent',
-    width: 16,
-    height: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
-  },
-  removeBtnText: {
-    fontSize: 16,
-    color: '#6b7280',
-  },
-  generateLink: {
-    marginTop: 8,
-  },
-  generateLinkText: {
-    fontSize: 14,
-    backgroundColor: '#FFD66B',
-    color: '#1f2937',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 30,
-    textAlign: 'center',
-    fontWeight: '600',
-    overflow: 'hidden',
-  },
-  generateLinkTextClicked: {
-    backgroundColor: '#b5ead7',
-  },
-  templates: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 16,
-  },
-  templateBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    fontSize: 12,
-    backgroundColor: '#FFD66B',
-    color: '#1f2937',
-    borderRadius: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  templateBtnText: {
-    fontSize: 12,
-    color: '#1f2937',
-    fontWeight: '600',
-  },
-  toggleList: {
-    gap: 10,
-  },
-  toggleItem: {
-    backgroundColor: '#ffffff',
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  toggleItemActive: {
-    borderColor: '#b5ead7',
-    backgroundColor: 'rgba(181, 234, 215, 0.15)',
-  },
-  toggleItemText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#1f2937',
-  },
-  toggleSwitch: {
-    position: 'relative',
-    width: 44,
-    height: 24,
-    backgroundColor: '#d1d5db',
-    borderRadius: 50,
-  },
-  toggleSwitchActive: {
-    backgroundColor: '#b5eac1',
-  },
-  toggleSwitchKnob: {
-    position: 'absolute',
-    top: 2,
-    left: 2,
-    width: 20,
-    height: 20,
-    backgroundColor: 'white',
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  toggleSwitchKnobActive: {
-    transform: [{ translateX: 20 }],
-  },
-  photoButton: {
-    width: '100%',
-    paddingVertical: 12,
-    marginTop: 8,
-    backgroundColor: '#FFD66B',
-    color: '#1f2937',
-    borderRadius: 999,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  photoButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1f2937',
-  },
-  selectorButton: {
-    width: '100%',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    backgroundColor: '#f1f5f9',
-    color: '#1f2937',
-    borderRadius: 10,
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-  },
-  selectorButtonSelected: {
-    backgroundColor: '#b5ead7',
-  },
-  selectorButtonDisabled: {
-    opacity: 0.5,
-  },
-  selectorButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f2937',
-    textAlign: 'left',
-  },
-  selectorButtonTextDisabled: {
-    color: '#6b7280',
-  },
-  disclaimer: {
-    fontSize: 12,
-    color: '#6b7280',
-    marginTop: 6,
-    fontStyle: 'italic',
-  },
-  notePreview: {
-    marginTop: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    backgroundColor: '#fdfdfd',
-    borderRadius: 8,
-  },
-  notePreviewText: {
-    fontSize: 13,
-    color: '#6b7280',
-    fontStyle: 'italic',
-  },
-  submitButton: {
-    backgroundColor: '#FFD66B',
-    color: '#1f2937',
-    borderRadius: 999,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    marginHorizontal: 20,
-    marginTop: 20,
-    marginBottom: 20,
-  },
-  submitButtonDisabled: {
-    backgroundColor: '#d1d5db',
-  },
-  submitButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1f2937',
-  },
-  cameraContainer: {
-    flex: 1,
-  },
-  camera: {
-    flex: 1,
-  },
-  cameraControls: {
-    position: 'absolute',
-    bottom: 50,
+    top: 40,
     left: 0,
     right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
+    backgroundColor: '#000',
+    borderRadius: 16,
+    overflow: 'hidden',
+    zIndex: 1000,
+    borderWidth: 1,
+    borderColor: '#000',
   },
-  cameraButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: 25,
+  dropdownItem: { paddingVertical: 16, paddingHorizontal: 24, backgroundColor: '#e5e7eb' },
+  dropdownItemActive: { backgroundColor: ACCENT_GREEN },
+  dropdownItemText: { fontSize: 16, color: '#000', fontWeight: '400', fontFamily: 'Inter-Regular' },
+  dropdownItemTextActive: { color: '#000' },
+  dropdownDivider: { height: 1, backgroundColor: '#000' },
+
+  /* content */
+  content: { flex: 1, backgroundColor: '#f3f4f6' },
+
+  /* progress */
+  progressBarContainer: {
+    backgroundColor: '#000',
   },
-  cameraButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+  progressBar: { 
+    height: 8, 
+    backgroundColor: '#d1d5db', 
+    overflow: 'hidden' 
   },
-  captureButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'white',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  captureButtonText: {
-    fontSize: 30,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: 'white',
+  progressFill: { height: '100%', backgroundColor: ACCENT_GREEN },
+
+  /* cards */
+  card: {
+    backgroundColor: '#fff',
     borderRadius: 20,
     padding: 24,
-    minWidth: 280,
-    maxWidth: '90%',
+    marginBottom: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1f2937',
-    textAlign: 'center',
-    marginBottom: 20,
+  cardTitle: { fontSize: 18, fontWeight: '400', color: '#111827', marginBottom: 12, fontFamily: 'Inter-Regular' },
+
+  /* input */
+  input: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 14,
+    padding: 14,
+    fontSize: 15,
+    color: '#111827',
+    backgroundColor: '#fff',
   },
-  modalOption: {
-    paddingVertical: 16,
+
+  /* recipient chip */
+  recipientChipWide: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(217,184,243,0.6)',
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingLeft: 16,
+    paddingRight: 10,
+    marginBottom: 12,
+    alignSelf: 'flex-start',
+  },
+  recipientChipText: { fontSize: 15, color: '#111827', marginRight: 8 },
+  chipX: { fontSize: 18, color: '#374151', paddingHorizontal: 6 },
+
+  inlineInfo: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  inlineInfoText: { fontSize: 13, color: '#6b7280' },
+
+  /* shareable link */
+  fullWidthButton: { borderRadius: 14, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center' },
+  fullWidthButtonNeutral: { backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb' },
+  fullWidthButtonActive: { backgroundColor: ACCENT_GREEN, borderWidth: 1, borderColor: ACCENT_GREEN },
+  fullWidthButtonText: { fontSize: 15, color: '#111827' },
+  fullWidthButtonTextActive: { color: '#111827' },
+  shareableLinkDescription: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: 10,
+    lineHeight: 18,
+  },
+
+  /* templates */
+  templatesTitle: { fontSize: 16, color: '#111827', marginBottom: 10, fontFamily: 'Inter-Regular' },
+  templatesRow: { flexDirection: 'row', gap: 10 },
+  templateBtnWide: { flex: 1, borderRadius: 999, backgroundColor: ACCENT_GREEN, paddingVertical: 10, alignItems: 'center', justifyContent: 'center' },
+  templateBtnText: { fontSize: 14, color: '#111827', fontWeight: '400', fontFamily: 'Inter-Regular' },
+
+  /* info rows */
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+    justifyContent: 'space-between',
+  },
+  infoRowText: { fontSize: 15, color: '#111827' },
+  privacyNote: { 
+    fontSize: 12, 
+    color: '#9ca3af', 
+    marginTop: 4,
+    lineHeight: 16,
+  },
+
+  /* toggle */
+  toggle: { width: 48, height: 26, borderRadius: 13, backgroundColor: '#d1d5db', padding: 3 },
+  toggleActive: { backgroundColor: '#000' },
+  toggleKnob: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff' },
+  toggleKnobActive: { transform: [{ translateX: 22 }] },
+
+  /* location */
+  locationGeneratingText: { fontSize: 14, color: '#111827', textAlign: 'left', paddingHorizontal: 2, paddingVertical: 4 },
+  locationCaptured: { backgroundColor: '#f3f4f6', borderRadius: 14, padding: 24, alignItems: 'center', justifyContent: 'center', gap: 20 },
+  locationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  locationCapturedText: { color: '#111827', fontSize: 16, fontWeight: '400' },
+  locationUpdateBtn: {
+    paddingVertical: 10,
     paddingHorizontal: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    alignItems: 'center',
   },
-  modalOptionText: {
-    fontSize: 16,
-    color: '#1f2937',
-    textAlign: 'center',
-  },
-  modalSave: {
-    backgroundColor: '#FFD66B',
-    paddingVertical: 12,
+  locationUpdateBtnText: { color: '#111827', fontSize: 14, fontWeight: '400' },
+
+  /* media capture */
+  takePhotoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
     paddingHorizontal: 24,
     borderRadius: 12,
-    marginTop: 16,
+    backgroundColor: ACCENT_GREEN,
+    justifyContent: 'center',
+    alignSelf: 'center',
+  },
+  takePhotoBtnText: { fontSize: 15, color: '#111827', fontWeight: '400' },
+
+  photoCaptured: { backgroundColor: '#f3f4f6', borderRadius: 14, padding: 24, gap: 20 },
+  photoCapturedHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center' },
+  photoCapturedHeaderText: { color: '#111827', fontSize: 16, fontWeight: '400' },
+  photoCapturedActions: { flexDirection: 'row', gap: 12, justifyContent: 'center' },
+  whitePillBtn: { backgroundColor: '#fff', borderRadius: 999, paddingVertical: 12, paddingHorizontal: 20 },
+  whitePillBtnText: { color: '#111827', fontSize: 14, fontWeight: '400' },
+
+  /* views allowed */
+  viewsSelector: {
+    flexDirection: 'row',
     alignItems: 'center',
-  },
-  modalSaveText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f2937',
-    textAlign: 'center',
-  },
-  modalCancel: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    marginTop: 8,
-    alignItems: 'center',
-  },
-  modalCancelText: {
-    fontSize: 16,
-    color: '#64748b',
-    textAlign: 'center',
-  },
-  notesInput: {
-    borderWidth: 2,
+    justifyContent: 'space-between',
+    borderWidth: 1,
     borderColor: '#e5e7eb',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 14,
-    textAlignVertical: 'top',
-    minHeight: 80,
-    marginBottom: 16,
+    borderRadius: 14,
+    padding: 14,
+    backgroundColor: '#fff',
   },
+  viewsSelectorText: { fontSize: 15, color: '#111827' },
+
+  /* views modal */
+  modalOverlay: { 
+    flex: 1, 
+    backgroundColor: 'rgba(0,0,0,0.5)', 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    padding: 20 
+  },
+  viewsModalCard: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+  },
+  viewsModalTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#111827',
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  viewsModalOptions: {
+    gap: 12,
+    marginBottom: 20,
+  },
+  viewsModalOption: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    backgroundColor: '#fff',
+  },
+  viewsModalOptionActive: {
+    backgroundColor: '#000',
+    borderColor: '#000',
+  },
+  viewsModalOptionText: {
+    fontSize: 16,
+    color: '#111827',
+    textAlign: 'center',
+  },
+  viewsModalOptionTextActive: {
+    color: '#ffffff',
+    fontWeight: '500',
+  },
+  viewsModalCancel: {
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 14,
+  },
+  viewsModalCancelText: {
+    fontSize: 16,
+    color: '#6b7280',
+    textAlign: 'center',
+  },
+
+  /* notes */
+  notesInput: { minHeight: 110, paddingTop: 12 },
+  notesCount: { fontSize: 12, color: '#9ca3af', textAlign: 'right', marginTop: 8 },
+
+  /* submit */
+  submitButton: {
+    backgroundColor: ACCENT_GREEN,
+    paddingVertical: 18,
+    paddingHorizontal: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  submitButtonDisabled: { backgroundColor: '#e5e7eb' },
+  submitButtonText: { fontSize: 18, color: '#111827', fontWeight: '400' },
+  submitButtonTextDisabled: { color: '#6b7280', fontWeight: '400' },
+
+  /* camera */
+  cameraContainer: { flex: 1, backgroundColor: '#000' },
+  camera: { flex: 1 },
+  cameraOverlay: { flex: 1 },
+  cameraClose: {
+    position: 'absolute', top: 60, left: 30,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', zIndex: 10,
+  },
+  cameraBottomControls: {
+    position: 'absolute',
+    bottom: 80,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  capturePhotoButtonCamera: {
+    width: 76, height: 76, borderRadius: 38, backgroundColor: 'transparent',
+    alignItems: 'center', justifyContent: 'center', borderWidth: 4, borderColor: '#fff',
+  },
+  capturePhotoButtonInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: ACCENT_GREEN },
+  cameraFlipButton: {
+    position: 'absolute',
+    left: '50%',
+    marginLeft: 50,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* preview modal */
+  previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  previewCard: { width: '100%', maxWidth: 420, backgroundColor: '#fff', borderRadius: 20, padding: 18 },
+  previewMedia: { height: 480, borderRadius: 16, backgroundColor: '#f3f4f6', overflow: 'hidden', marginBottom: 14 },
+  previewEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
+  previewEmptyText: { color: '#111827', fontSize: 15 },
+  previewClose: { alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 22, backgroundColor: '#000', borderRadius: 999 },
+  previewCloseText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+
+  /* skeleton */
+  skeletonCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  skeletonTitle: { height: 16, backgroundColor: '#e5e7eb', borderRadius: 4, marginBottom: 12, width: '30%' },
+  skeletonInput: { height: 48, backgroundColor: '#e5e7eb', borderRadius: 12, marginBottom: 12 },
+  skeletonRow: { flexDirection: 'row', gap: 8 },
+  skeletonBtn: { flex: 1, height: 36, backgroundColor: '#e5e7eb', borderRadius: 999 },
 });

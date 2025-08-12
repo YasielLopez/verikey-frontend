@@ -1,673 +1,1363 @@
-import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { CameraView } from 'expo-camera';
-import React, { useRef, useState } from 'react';
+import { RequestsAPI, UIRequestData } from '@/services/api';
+import { useFocusEffect, useRoute } from '@react-navigation/native';
+import { router } from 'expo-router';
+import {
+  AlertTriangle,
+  Bell,
+  Calendar,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Edit,
+  MoreHorizontal,
+  SlidersHorizontal,
+  Trash2,
+  User,
+  X
+} from 'lucide-react-native';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
+  Dimensions,
+  FlatList,
   Modal,
-  ScrollView,
+  Pressable,
+  RefreshControl,
+  StatusBar,
   StyleSheet,
+  Text,
   TextInput,
   TouchableOpacity,
-  View
+  View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-interface RequestData {
-  id: number;
-  title: string;
-  from?: string;
-  sentTo?: string;
-  status: 'pending' | 'active' | 'denied';
-  receivedTime?: string;
-  sentTime?: string;
-  type: 'received' | 'sent';
-}
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const APP_PURPLE = '#D9B8F3';
+const DENIED_COLOR = '#EE5E37'; 
 
-export default function RequestsScreen() {
-  const [activeTab, setActiveTab] = useState<'received' | 'sent'>('received');
-  const [requests, setRequests] = useState<RequestData[]>([]);
-  const [loading, setLoading] = useState(false);
+type FilterType = 'all' | 'pending' | 'completed' | 'denied';
 
-  // Modal states
-  const [showCameraModal, setShowCameraModal] = useState(false);
-  const [showExpiryModal, setShowExpiryModal] = useState(false);
-  const [showViewsModal, setShowViewsModal] = useState(false);
-  const [showNotesModal, setShowNotesModal] = useState(false);
-  const [showDenyModal, setShowDenyModal] = useState(false);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [showReportModal, setShowReportModal] = useState(false);
-
-  // Response form states
-  const [responseNote, setResponseNote] = useState('');
-  const [responseExpiry, setResponseExpiry] = useState('');
-  const [responseViews, setResponseViews] = useState('');
-  const [photoTaken, setPhotoTaken] = useState(false);
-  const [currentRequest, setCurrentRequest] = useState<RequestData | null>(null);
-
-  const cameraRef = useRef(null);
-
-  // Mock data matching the mockup
-  const mockRequests: RequestData[] = [
-    // Received Requests
-    {
-      id: 1,
-      title: 'Age Verification Request',
-      from: 'marcus.dev@outlook.com',
-      status: 'pending',
-      receivedTime: '2 hours ago',
-      type: 'received',
-    },
-    {
-      id: 2,
-      title: 'Dating Verification',
-      from: '@alex_photos',
-      status: 'denied',
-      receivedTime: 'June 1, 2025',
-      type: 'received',
-    },
-    // Your Requests
-    {
-      id: 3,
-      title: 'Marketplace Seller Check',
-      sentTo: '(415) 287-9054',
-      status: 'pending',
-      sentTime: '45 minutes ago',
-      type: 'sent',
-    },
-    {
-      id: 4,
-      title: 'Event Meet-up Verification',
-      sentTo: '@eventplanner_jay',
-      status: 'denied',
-      sentTime: 'May 30, 2025',
-      type: 'sent',
-    },
-  ];
+const SkeletonCard = () => {
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
 
   React.useEffect(() => {
-    setRequests(mockRequests);
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, {
+          toValue: 1,
+          duration: 1500,
+          useNativeDriver: true,
+        }),
+        Animated.timing(shimmerAnim, {
+          toValue: 0,
+          duration: 1500,
+          useNativeDriver: true,
+        }),
+      ])
+    ).start();
   }, []);
 
-  const getStatusBubbleStyle = (status: string) => {
-    const baseStyle = [styles.statusBubble];
-    switch (status) {
-      case 'pending':
-        return [...baseStyle, styles.statusPending];
-      case 'denied':
-        return [...baseStyle, styles.statusDenied];
-      default:
-        return baseStyle;
+  return (
+    <Animated.View
+      style={[
+        styles.card,
+        {
+          opacity: shimmerAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.3, 0.6],
+          })
+        }
+      ]}
+    >
+      <View style={styles.skeletonPill} />
+      <View style={styles.skeletonTitle} />
+      <View style={styles.skeletonLine} />
+      <View style={[styles.skeletonLine, { width: '60%' }]} />
+      <View style={styles.skeletonButton} />
+    </Animated.View>
+  );
+};
+
+export default function RequestsScreen() {
+  const route = useRoute();
+  const [activeTab, setActiveTab] = useState<'received' | 'sent'>('received');
+  const [allRequests, setAllRequests] = useState<{sent: UIRequestData[]; received: UIRequestData[]}>({
+    sent: [],
+    received: []
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [currentRequest, setCurrentRequest] = useState<UIRequestData | null>(null);
+  const [reportText, setReportText] = useState('');
+  const [activeFilters, setActiveFilters] = useState<Set<FilterType>>(new Set(['all']));
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activePopup, setActivePopup] = useState<number | null>(null);
+
+  const lastLoadTime = useRef<number>(0);
+  const isBackgroundLoading = useRef<boolean>(false);
+  const MIN_REFRESH_INTERVAL = 5000;
+  const isMounted = useRef<boolean>(true);
+  const isNavigatingToDetail = useRef(false);
+
+  React.useEffect(() => {
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!isNavigatingToDetail.current) {
+        setActiveTab('received');
+      }
+      isNavigatingToDetail.current = false;
+
+      const loadInitial = async () => {
+        const now = Date.now();
+        const shouldForceRefresh = now - lastLoadTime.current > MIN_REFRESH_INTERVAL;
+
+        try {
+          const cachedData = await RequestsAPI.getRequests(false);
+          if (cachedData && (cachedData.sent.length > 0 || cachedData.received.length > 0)) {
+            if (isMounted.current) {
+              setAllRequests(cachedData);
+              setLoading(false);
+            }
+          }
+        } catch (error) {
+          console.error('⚠ Cache load failed:', error);
+        }
+
+        if (shouldForceRefresh && !isBackgroundLoading.current) {
+          isBackgroundLoading.current = true;
+          try {
+            const freshData = await RequestsAPI.getRequests(true);
+            if (isMounted.current) {
+              setAllRequests(freshData);
+              lastLoadTime.current = now;
+            }
+          } catch (error) {
+            console.error('⚠ Background refresh failed:', error);
+          } finally {
+            isBackgroundLoading.current = false;
+            if (isMounted.current && loading) {
+              setLoading(false);
+            }
+          }
+        } else if (loading) {
+          setLoading(false);
+        }
+      };
+
+      loadInitial();
+    }, [route.params])
+  );
+
+  const handleTabChange = (tab: 'received' | 'sent') => {
+    setActiveTab(tab);
+    setShowDropdown(false);
+    setActivePopup(null);
+  };
+
+  const formatDateDisplay = (dateString: string): string => {
+    if (!dateString) return 'Unknown';
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date.getTime())) return 'Unknown';
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+    } catch {
+      return 'Unknown';
     }
   };
 
-  const filteredRequests = requests.filter(request => request.type === activeTab);
-  const activeRequests = filteredRequests.filter(request => request.status === 'pending');
-  const deniedRequests = filteredRequests.filter(request => request.status === 'denied');
+  const loadRequests = async (showRefreshIndicator = false, forceRefresh = false) => {
+    try {
+      if (showRefreshIndicator) setRefreshing(true);
+      else if (!isBackgroundLoading.current) setLoading(true);
 
-  const renderModeToggle = () => (
-    <View style={styles.modeToggle}>
-      <View style={[styles.modeSlider, activeTab === 'sent' && styles.modeSliderRight]} />
-      <TouchableOpacity
-        style={styles.modeOption}
-        onPress={() => setActiveTab('received')}
-      >
-        <ThemedText style={[styles.modeOptionText, activeTab === 'received' && styles.modeOptionActive]}>
-          Received
-        </ThemedText>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.modeOption}
-        onPress={() => setActiveTab('sent')}
-      >
-        <ThemedText style={[styles.modeOptionText, activeTab === 'sent' && styles.modeOptionActive]}>
-          Your Requests
-        </ThemedText>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const handleRespond = (request: RequestData) => {
-    setCurrentRequest(request);
-    // Navigate to age verification response screen
-    Alert.alert('Respond to Request', `Would respond to: ${request.title}`);
+      const requestsData = await RequestsAPI.getRequests(forceRefresh);
+      if (isMounted.current) {
+        setAllRequests(requestsData);
+        lastLoadTime.current = Date.now();
+      }
+    } catch (error: any) {
+      console.error('Failed to load requests:', error);
+      if (!isBackgroundLoading.current && isMounted.current) {
+        Alert.alert('Error', 'Failed to load requests', [
+          { text: 'Retry', onPress: () => loadRequests(showRefreshIndicator, true) },
+          { text: 'OK', style: 'cancel' }
+        ]);
+      }
+    } finally {
+      if (isMounted.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
   };
 
-  const handleDeny = (request: RequestData) => {
-    setCurrentRequest(request);
-    setShowDenyModal(true);
+  const handleRefresh = () => {
+    lastLoadTime.current = Date.now();
+    loadRequests(true, true);
   };
 
-  const handleEdit = (request: RequestData) => {
-    setCurrentRequest(request);
-    Alert.alert('Edit Request', `Would edit: ${request.title}`);
+  const filteredRequests = activeTab === 'received' ? allRequests.received : allRequests.sent;
+  const pendingRequests = filteredRequests.filter(req => req.status === 'pending');
+  const completedRequests = filteredRequests.filter(req => req.status === 'completed');
+  const deniedRequests = filteredRequests.filter(req => req.status === 'denied' || req.status === 'cancelled');
+
+  const toggleFilter = (filter: FilterType) => {
+    setActiveFilters(new Set([filter]));
   };
 
-  const handleDelete = (request: RequestData) => {
-    setCurrentRequest(request);
-    setShowDeleteModal(true);
+  const getDisplayRequests = () => {
+    if (activeFilters.has('all')) {
+      return [...filteredRequests].sort((a, b) => {
+        const dateA = new Date(a.receivedOn || a.sentOn || '').getTime();
+        const dateB = new Date(b.receivedOn || b.sentOn || '').getTime();
+        return dateB - dateA;
+      });
+    }
+    if (activeFilters.has('pending')) return pendingRequests;
+    if (activeFilters.has('completed')) return completedRequests;
+    if (activeFilters.has('denied')) return deniedRequests;
+    return filteredRequests;
   };
 
-  const handleReport = (request: RequestData) => {
+  const displayRequests = getDisplayRequests();
+
+  const handleRequestAction = (request: UIRequestData) => {
+    isNavigatingToDetail.current = true;
+    if (activeTab === 'received' && request.status === 'pending') {
+      router.push({
+        pathname: '/verification-response',
+        params: {
+          requestId: request.id.toString(),
+          requestTitle: request.title,
+          requesterEmail: request.from || 'Unknown',
+          informationTypes: JSON.stringify(request.informationTypes || ['age'])
+        }
+      });
+    } else if (activeTab === 'sent' && request.status === 'pending') {
+      router.push({
+        pathname: '/edit-request',
+        params: {
+          requestId: request.id.toString(),
+          title: request.title,
+          sentTo: request.sentTo || 'Unknown',
+          sentOn: formatDateDisplay(request.sentOn || 'Unknown'),
+          informationTypes: JSON.stringify(request.informationTypes || []),
+          notes: request.notes || ''
+        }
+      });
+    }
+  };
+
+  const handleReport = (request: UIRequestData) => {
     setCurrentRequest(request);
+    setReportText('');
     setShowReportModal(true);
   };
 
-  const confirmDeny = () => {
-    if (currentRequest) {
-      Alert.alert('Success', 'Request denied successfully');
-      setShowDenyModal(false);
-      setCurrentRequest(null);
+  const handleDelete = async (request: UIRequestData) => {
+    try {
+      await RequestsAPI.deleteRequest(request.id);
+      setAllRequests((prev) =>
+        activeTab === 'received'
+          ? { ...prev, received: prev.received.filter((r) => r.id !== request.id) }
+          : { ...prev, sent: prev.sent.filter((r) => r.id !== request.id) }
+      );
+      setActivePopup(null);
+      Alert.alert('Success', 'Request deleted successfully');
+    } catch (error: any) {
+      console.error('Failed to delete request:', error);
+      Alert.alert('Error', 'Failed to delete request. Please try again.');
     }
   };
 
-  const confirmDelete = () => {
-    if (currentRequest) {
-      Alert.alert('Success', 'Request deleted successfully');
-      setShowDeleteModal(false);
-      setCurrentRequest(null);
+  const handleDeny = async (request: UIRequestData) => {
+    try {
+      await RequestsAPI.denyRequest(request.id);
+      await loadRequests(false, true);
+      Alert.alert('Success', 'Request denied successfully');
+    } catch (error: any) {
+      console.error('Deny request failed:', error);
+      Alert.alert('Error', 'Failed to deny request. Please try again.');
     }
   };
 
   const submitReport = () => {
-    Alert.alert('Success', 'Report submitted successfully');
     setShowReportModal(false);
     setCurrentRequest(null);
+    setReportText('');
   };
 
-  const renderRequestCard = (request: RequestData) => (
-    <View key={request.id} style={[styles.requestCard, request.status === 'denied' && styles.deniedCard]}>
-      <View style={getStatusBubbleStyle(request.status)}>
-        <ThemedText style={styles.statusText}>
-          {request.status}
-        </ThemedText>
-      </View>
-      
-      <View style={styles.requestInfo}>
-        <ThemedText style={styles.requestTitle}>{request.title}</ThemedText>
-        <View style={styles.requestDivider} />
-        
-        <ThemedText style={styles.requestDetail}>
-          {activeTab === 'received' ? 'From:' : 'Sent to:'} {request.from || request.sentTo}
-        </ThemedText>
-        <ThemedText style={styles.requestDetail}>
-          {activeTab === 'received' 
-            ? (request.status === 'denied' ? `Denied ${request.receivedTime}` : `Received ${request.receivedTime}`)
-            : (request.status === 'denied' ? `Denied ${request.sentTime}` : `Sent ${request.sentTime}`)
-          }
-        </ThemedText>
-      </View>
-      
-      {request.status === 'pending' ? (
-        <View style={styles.buttonRow}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.primaryButton]}
-            onPress={() => activeTab === 'received' ? handleRespond(request) : handleEdit(request)}
-          >
-            <ThemedText style={styles.primaryButtonText}>
-              {activeTab === 'received' ? 'Respond' : 'Edit'}
-            </ThemedText>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.secondaryButton]}
-            onPress={() => activeTab === 'received' ? handleDeny(request) : handleDelete(request)}
-          >
-            <ThemedText style={styles.secondaryButtonText}>
-              {activeTab === 'received' ? 'Deny' : 'Cancel'}
-            </ThemedText>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <View style={styles.buttonRow}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.reportButton]}
-            onPress={() => handleReport(request)}
-          >
-            <ThemedText style={styles.reportButtonText}>Report</ThemedText>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.secondaryButton]}
-            onPress={() => handleDelete(request)}
-          >
-            <ThemedText style={styles.secondaryButtonText}>Delete</ThemedText>
-          </TouchableOpacity>
-        </View>
-      )}
-    </View>
-  );
+  const cleanSenderName = (name: string | undefined): string => {
+    if (!name) return 'Unknown';
+    return name.startsWith('@') ? name.substring(1) : name;
+  };
 
-  return (
-    <ThemedView style={styles.container}>
-      <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>Requests</ThemedText>
-      </View>
-      
-      {renderModeToggle()}
-      
-      <ScrollView 
-        style={styles.content} 
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      >
-        {activeRequests.length > 0 && (
-          <>
-            <ThemedText style={styles.sectionTitle}>Active</ThemedText>
-            {activeRequests.map(renderRequestCard)}
-          </>
-        )}
-        
-        {deniedRequests.length > 0 && (
-          <>
-            <ThemedText style={styles.sectionHeader}>Denied</ThemedText>
-            {deniedRequests.map(renderRequestCard)}
-          </>
-        )}
-        
-        {filteredRequests.length === 0 && (
-          <View style={styles.emptyState}>
-            <ThemedText style={styles.emptyText}>
-              No {activeTab === 'received' ? 'received requests' : 'sent requests'} yet
-            </ThemedText>
-          </View>
-        )}
-      </ScrollView>
+  const renderRequestCard = (request: UIRequestData) => {
+    const isPopupOpen = activePopup === request.id;
+    const isDimmed = isPopupOpen || request.status !== 'pending';
+    
+    const getCardStyle = () =>
+      isDimmed ? [styles.card, styles.inactiveCard] : styles.card;
+    
+    const getPillStyle = () =>
+      isDimmed ? [styles.senderPill, styles.inactivePill] : styles.senderPill;
+    
+    const getTitleStyle = () =>
+      isDimmed ? [styles.cardTitle, styles.inactiveText] : styles.cardTitle;
+    
+    const getStatusTextStyle = () =>
+      isDimmed ? [styles.statusText, styles.inactiveStatusText] : styles.statusText;
+    
+    const metaIconColor = isDimmed ? '#9ca3af' : '#6b7280';
+    const userIconColor = isDimmed ? '#9ca3af' : '#374151';
+    
+    const statusDotStyle = [
+      styles.statusDot,
+      request.status === 'pending' && !isDimmed && styles.pendingStatusDot,
+      request.status === 'completed' && styles.completedStatusDot,
+      (request.status === 'denied' || request.status === 'cancelled') && styles.deniedStatusDot,
+      isDimmed && styles.inactiveStatusDot,
+    ];
 
-      {/* Camera Modal */}
-      <Modal
-        visible={showCameraModal}
-        animationType="slide"
-        presentationStyle="fullScreen"
-      >
-        <ThemedView style={styles.cameraContainer}>
-          <CameraView
-            style={styles.camera}
-            facing="front"
-            ref={cameraRef}
+    const getStatusText = () => {
+      if (request.status === 'pending') return 'This request is pending';
+      if (request.status === 'completed') return 'This request was completed';
+      if (request.status === 'denied') return 'This request was denied';
+      if (request.status === 'cancelled') return 'This request was cancelled';
+      return 'Unknown status';
+    };
+
+    return (
+      <View key={request.id}>
+        {isPopupOpen && (
+          <Pressable
+            style={styles.fullScreenOverlay}
+            onPress={() => setActivePopup(null)}
           />
-          <ThemedView style={styles.cameraControls}>
+        )}
+        
+        <TouchableOpacity
+          style={getCardStyle()}
+          onPress={() => handleRequestAction(request)}
+          activeOpacity={0.98}
+        >
+          {/* Floating sender pill */}
+          <View style={getPillStyle()}>
+            <User size={14} color={userIconColor} />
+            <Text style={styles.pillText} numberOfLines={1}>
+              {activeTab === 'received'
+                ? `From ${cleanSenderName(request.from)}`
+                : `To ${cleanSenderName(request.sentTo)}`}
+            </Text>
+          </View>
+
+          {/* Three Dots Menu Button */}
+          <TouchableOpacity
+            style={styles.menuButton}
+            onPress={(e) => {
+              e.stopPropagation();
+              setActivePopup(isPopupOpen ? null : request.id);
+            }}
+          >
+            <MoreHorizontal size={20} color="#6b7280" />
+          </TouchableOpacity>
+
+          {/* Card content */}
+          <View style={styles.cardContent}>
+            <Text style={getTitleStyle()}>{request.title}</Text>
+            
+            <View style={{ flex: 1, justifyContent: 'center' }}>
+              <View style={styles.statusRow}>
+                <View style={statusDotStyle as any} />
+                <Text style={getStatusTextStyle()}>{getStatusText()}</Text>
+              </View>
+            </View>
+
+            {/* Metadata row */}
+            <View style={styles.metadataRow}>
+              <View style={styles.metadataPill}>
+                <Calendar size={14} color="#6b7280" />
+                <Text style={styles.metadataText}>
+                  {formatDateDisplay(activeTab === 'received' ? request.receivedOn : request.sentOn)}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Action button for pending requests */}
+          {request.status === 'pending' && (
             <TouchableOpacity
-              style={styles.cameraButton}
-              onPress={() => setShowCameraModal(false)}
-            >
-              <ThemedText style={styles.cameraButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.captureButton}
-              onPress={() => {
-                setPhotoTaken(true);
-                setShowCameraModal(false);
-                Alert.alert('Success', 'Photo captured successfully!');
+              style={[
+                styles.arrowButton,
+                isDimmed && styles.arrowButtonDimmed
+              ]}
+              onPress={(e) => {
+                e.stopPropagation();
+                handleRequestAction(request);
               }}
             >
-              <ThemedText style={styles.captureButtonText}>📸</ThemedText>
+              {activeTab === 'received' ? (
+                <ChevronRight size={20} color={isDimmed ? '#9ca3af' : '#374151'} />
+              ) : (
+                <Edit size={16} color={isDimmed ? '#9ca3af' : '#374151'} />
+              )}
             </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
+          )}
 
-      {/* Deny Request Modal */}
-      <Modal visible={showDenyModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Deny Request</ThemedText>
-            <ThemedText style={styles.modalMessage}>
-              Are you sure you want to deny this request? The requester will be notified.
-            </ThemedText>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.confirmButton]}
-              onPress={confirmDeny}
-            >
-              <ThemedText style={styles.confirmButtonText}>Confirm</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.cancelButton]}
-              onPress={() => setShowDenyModal(false)}
-            >
-              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
+          {/* Popup menu */}
+          {isPopupOpen && (
+            <View style={[
+              styles.popupMenuCentered,
+              (request.status !== 'pending' || activeTab !== 'received') && { transform: [{ translateX: -80 }, { translateY: -30 }] },
+              activeTab === 'sent' && { transform: [{ translateX: -80 }, { translateY: -10 }] }
+            ]}>
+              {request.status === 'pending' && activeTab === 'received' && (
+                <TouchableOpacity
+                  style={styles.popupMenuItem}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    setActivePopup(null);
+                    handleDeny(request);
+                  }}
+                >
+                  <X size={20} color="#6b7280" />
+                  <Text style={styles.popupMenuText}>Deny</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[
+                  styles.popupMenuItem,
+                  request.status === 'pending' && activeTab === 'received' && styles.popupMenuItemBorderTop
+                ]}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  setActivePopup(null);
+                  handleDelete(request);
+                }}
+              >
+                <Trash2 size={20} color="#6b7280" />
+                <Text style={styles.popupMenuText}>Delete</Text>
+              </TouchableOpacity>
+              {activeTab === 'received' && (
+                <TouchableOpacity
+                  style={[styles.popupMenuItem, styles.popupMenuItemBorderTop]}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    setActivePopup(null);
+                    handleReport(request);
+                  }}
+                >
+                  <AlertTriangle size={20} color="#6b7280" />
+                  <Text style={styles.popupMenuText}>Report</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>
+    );
+  };
 
-      {/* Delete Modal */}
-      <Modal visible={showDeleteModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>
-              {activeTab === 'received' ? 'Delete Request' : 'Cancel Request'}
-            </ThemedText>
-            <ThemedText style={styles.modalMessage}>
-              {activeTab === 'received' 
-                ? 'Are you sure you want to delete this request? This action cannot be undone.'
-                : 'Are you sure you want to cancel this request? The recipient will be notified.'
-              }
-            </ThemedText>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.confirmButton]}
-              onPress={confirmDelete}
-            >
-              <ThemedText style={styles.confirmButtonText}>Confirm</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.cancelButton]}
-              onPress={() => setShowDeleteModal(false)}
-            >
-              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
+  if (loading && allRequests.sent.length === 0 && allRequests.received.length === 0) {
+    return (
+      <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000000' }}>
+        <StatusBar barStyle="light-content" backgroundColor="#000000" />
+        <ThemedView style={styles.container}>
+          <View style={styles.header}>
+            <View style={styles.headerContent}>
+              <View style={styles.dropdownSection}>
+                <View style={styles.dropdownButton}>
+                  <Text style={styles.headerTitle}>
+                    {activeTab === 'received' ? 'Received Requests' : 'Sent Requests'}
+                  </Text>
+                  <ChevronDown size={20} color="#9ca3af" />
+                </View>
+              </View>
+              <TouchableOpacity
+                style={styles.headerIconButton}
+                onPress={() => {}}
+                accessibilityRole="button"
+                accessibilityLabel="Notifications"
+              >
+                <Bell size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+          <FlatList
+            data={[1, 2, 3, 4, 5]}
+            keyExtractor={(item) => item.toString()}
+            renderItem={() => <SkeletonCard />}
+            contentContainerStyle={styles.listContent}
+          />
         </ThemedView>
-      </Modal>
+      </SafeAreaView>
+    );
+  }
 
-      {/* Report Modal */}
-      <Modal visible={showReportModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Report an Incident</ThemedText>
-            <TextInput
-              style={styles.reportInput}
-              placeholder="Please describe the issue or incident..."
-              multiline
-              numberOfLines={4}
-              textAlignVertical="top"
+  return (
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000000' }}>
+      <StatusBar barStyle="light-content" backgroundColor="#000000" />
+      <ThemedView style={styles.container}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.headerContent}>
+            <View style={styles.dropdownSection}>
+              <TouchableOpacity
+                onPress={() => setShowDropdown(!showDropdown)}
+                style={styles.dropdownButton}
+                activeOpacity={1}
+              >
+                <Text style={styles.headerTitle}>
+                  {activeTab === 'received' ? 'Received Requests' : 'Sent Requests'}
+                </Text>
+                <ChevronDown
+                  size={20}
+                  color="#9ca3af"
+                  style={{ transform: [{ rotate: showDropdown ? '180deg' : '0deg' }] }}
+                />
+              </TouchableOpacity>
+
+              {showDropdown && (
+                <View style={styles.dropdown}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      handleTabChange('received');
+                      setShowDropdown(false);
+                    }}
+                    style={[
+                      styles.dropdownItem,
+                      activeTab === 'received' && styles.dropdownItemActive
+                    ]}
+                    activeOpacity={1}
+                  >
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        activeTab === 'received' && styles.dropdownItemTextActive
+                      ]}
+                    >
+                      Received Requests
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.dropdownDivider} />
+                  <TouchableOpacity
+                    onPress={() => {
+                      handleTabChange('sent');
+                      setShowDropdown(false);
+                    }}
+                    style={[
+                      styles.dropdownItem,
+                      activeTab === 'sent' && styles.dropdownItemActive
+                    ]}
+                    activeOpacity={1}
+                  >
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        activeTab === 'sent' && styles.dropdownItemTextActive
+                      ]}
+                    >
+                      Sent Requests
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={styles.headerIconButton}
+              onPress={() => {}}
+              accessibilityRole="button"
+              accessibilityLabel="Notifications"
+            >
+              <Bell size={20} color="#ffffff" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Content */}
+        <View style={styles.content}>
+          <FlatList
+            data={displayRequests}
+            keyExtractor={(item) => `request-${item.id}-${item.status}`}
+            ListHeaderComponent={() => (
+              <View style={styles.filterHeaderRow}>
+                <Text style={styles.filterHeaderText}>
+                  {activeFilters.has('all')
+                    ? `All Requests (${displayRequests.length})`
+                    : activeFilters.has('pending')
+                    ? `Pending Requests (${displayRequests.length})`
+                    : activeFilters.has('completed')
+                    ? `Completed Requests (${displayRequests.length})`
+                    : `Denied Requests (${displayRequests.length})`
+                  }
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setShowFilterModal(true)}
+                  style={styles.filterHeaderIcon}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open filters"
+                >
+                  <SlidersHorizontal size={20} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
+            )}
+            ListEmptyComponent={() => (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIcon}>
+                  <User size={32} color="#9ca3af" />
+                </View>
+                <Text style={styles.emptyTitle}>
+                  {activeFilters.has('all')
+                    ? `No ${activeTab} requests found`
+                    : `No ${activeFilters.values().next().value} ${activeTab} requests found`
+                  }
+                </Text>
+                <Text style={styles.emptySubtitle}>
+                  {activeTab === 'received'
+                    ? 'Requests sent to you will appear here'
+                    : 'Requests you send will appear here'
+                  }
+                </Text>
+              </View>
+            )}
+            renderItem={({ item }) => renderRequestCard(item)}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                colors={['#10b981']}
+                tintColor={'#10b981'}
+              />
+            }
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+          />
+        </View>
+
+        {/* Filter Modal */}
+        <Modal
+          visible={showFilterModal}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowFilterModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={() => setShowFilterModal(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close filters"
             />
-            <TouchableOpacity
-              style={[styles.modalButton, styles.confirmButton]}
-              onPress={submitReport}
-            >
-              <ThemedText style={styles.confirmButtonText}>Submit Report</ThemedText>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.cancelButton]}
-              onPress={() => setShowReportModal(false)}
-            >
-              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-    </ThemedView>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Filter Requests</Text>
+                <TouchableOpacity
+                  style={styles.modalCloseButton}
+                  onPress={() => setShowFilterModal(false)}
+                >
+                  <X size={20} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.filterOptions}>
+                {/* All Requests */}
+                {(() => {
+                  const selected = activeFilters.has('all');
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.filterOption,
+                        selected && styles.filterOptionActive
+                      ]}
+                      onPress={() => toggleFilter('all')}
+                      activeOpacity={0.9}
+                    >
+                      <View style={styles.filterOptionLeft}>
+                        <View style={[
+                          styles.filterDot,
+                          { backgroundColor: selected ? '#FFFFFF' : '#1f2937' }
+                        ]} />
+                        <Text style={[
+                          styles.filterOptionText,
+                          selected && { color: '#ffffff' }
+                        ]}>All Requests</Text>
+                      </View>
+                      <View style={styles.filterOptionRight}>
+                        <View style={[
+                          styles.filterCountCircle,
+                          selected && { backgroundColor: 'rgba(255,255,255,0.2)' }
+                        ]}>
+                          <Text style={[
+                            styles.filterCount,
+                            selected && { color: '#ffffff' }
+                          ]}>
+                            {filteredRequests.length}
+                          </Text>
+                        </View>
+                        {selected && <Check size={16} color="#ffffff" />}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })()}
+
+                {/* Pending Requests */}
+                {(() => {
+                  const selected = activeFilters.has('pending');
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.filterOption,
+                        selected && styles.filterOptionActive
+                      ]}
+                      onPress={() => toggleFilter('pending')}
+                      activeOpacity={0.9}
+                    >
+                      <View style={styles.filterOptionLeft}>
+                        <View style={[
+                          styles.filterDot,
+                          { backgroundColor: selected ? '#FFFFFF' : APP_PURPLE }
+                        ]} />
+                        <Text style={[
+                          styles.filterOptionText,
+                          selected && { color: '#ffffff' }
+                        ]}>Pending</Text>
+                      </View>
+                      <View style={styles.filterOptionRight}>
+                        <View style={[
+                          styles.filterCountCircle,
+                          selected && { backgroundColor: 'rgba(255,255,255,0.2)' }
+                        ]}>
+                          <Text style={[
+                            styles.filterCount,
+                            selected && { color: '#ffffff' }
+                          ]}>{pendingRequests.length}</Text>
+                        </View>
+                        {selected && <Check size={16} color="#ffffff" />}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })()}
+
+                {/* Completed Requests */}
+                {completedRequests.length > 0 && (() => {
+                  const selected = activeFilters.has('completed');
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.filterOption,
+                        selected && styles.filterOptionActive
+                      ]}
+                      onPress={() => toggleFilter('completed')}
+                      activeOpacity={0.9}
+                    >
+                      <View style={styles.filterOptionLeft}>
+                        <View style={[
+                          styles.filterDot,
+                          { backgroundColor: selected ? '#FFFFFF' : '#16a34a' }
+                        ]} />
+                        <Text style={[
+                          styles.filterOptionText,
+                          selected && { color: '#ffffff' }
+                        ]}>Completed</Text>
+                      </View>
+                      <View style={styles.filterOptionRight}>
+                        <View style={[
+                          styles.filterCountCircle,
+                          selected && { backgroundColor: 'rgba(255,255,255,0.2)' }
+                        ]}>
+                          <Text style={[
+                            styles.filterCount,
+                            selected && { color: '#ffffff' }
+                          ]}>{completedRequests.length}</Text>
+                        </View>
+                        {selected && <Check size={16} color="#ffffff" />}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })()}
+
+                {/* Denied Requests */}
+                {deniedRequests.length > 0 && (() => {
+                  const selected = activeFilters.has('denied');
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.filterOption,
+                        selected && styles.filterOptionActive
+                      ]}
+                      onPress={() => toggleFilter('denied')}
+                      activeOpacity={0.9}
+                    >
+                      <View style={styles.filterOptionLeft}>
+                        <View style={[
+                          styles.filterDot,
+                          { backgroundColor: selected ? '#FFFFFF' : DENIED_COLOR }
+                        ]} />
+                        <Text style={[
+                          styles.filterOptionText,
+                          selected && { color: '#ffffff' }
+                        ]}>Denied</Text>
+                      </View>
+                      <View style={styles.filterOptionRight}>
+                        <View style={[
+                          styles.filterCountCircle,
+                          selected && { backgroundColor: 'rgba(255,255,255,0.2)' }
+                        ]}>
+                          <Text style={[
+                            styles.filterCount,
+                            selected && { color: '#ffffff' }
+                          ]}>{deniedRequests.length}</Text>
+                        </View>
+                        {selected && <Check size={16} color="#ffffff" />}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })()}
+              </View>
+
+              {/* Clear Filters */}
+              {(!activeFilters.has('all')) && (
+                <TouchableOpacity
+                  style={styles.clearFiltersButton}
+                  onPress={() => {
+                    setActiveFilters(new Set(['all']));
+                    setShowFilterModal(false);
+                  }}
+                >
+                  <Text style={styles.clearFiltersText}>Clear All Filters</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        {/* Report Modal */}
+        <Modal visible={showReportModal} transparent animationType="slide">
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Report an Issue</Text>
+                <TouchableOpacity
+                  onPress={() => setShowReportModal(false)}
+                  style={styles.modalCloseButton}
+                >
+                  <X size={20} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.modalSubtext}>
+                Report request: "{currentRequest?.title}"
+              </Text>
+              <TextInput
+                style={styles.reportInput}
+                placeholder="Please describe the issue or incident..."
+                placeholderTextColor="#9ca3af"
+                multiline
+                numberOfLines={4}
+                value={reportText}
+                onChangeText={setReportText}
+              />
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSubmitButton]}
+                onPress={submitReport}
+                disabled={!reportText.trim()}
+              >
+                <Text style={styles.modalSubmitButtonText}>Submit Report</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalCancelButton]}
+                onPress={() => setShowReportModal(false)}
+              >
+                <Text style={styles.modalCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      </ThemedView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fdfdfd',
+    backgroundColor: '#000000',
   },
   header: {
-    backgroundColor: '#b5ead7',
-    paddingTop: 60,
-    paddingBottom: 20,
+    backgroundColor: '#000000',
+    paddingTop: 10,
+    paddingBottom: 24,
     paddingHorizontal: 20,
+  },
+  headerContent: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownSection: {
+    flex: 1,
+    marginRight: 16,
+  },
+  dropdownButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingLeft: 20, 
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontWeight: '400',
+    color: '#ffffff',
+    fontFamily: 'Poppins-Regular',
   },
-  modeToggle: {
-    backgroundColor: '#e9f9f3',
-    borderRadius: 999,
-    padding: 4,
-    margin: 20,
-    marginBottom: 20,
-    flexDirection: 'row',
-    position: 'relative',
+  headerIconButton: {
+    padding: 6,
   },
-modeSlider: {
-  position: 'absolute',
-  top: 4,
-  left: 4,
-  right: '50%', 
-  height: 44,
-  backgroundColor: '#b5eac1',
-  borderRadius: 999,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.1,
-  shadowRadius: 3,
-  elevation: 2,
-  zIndex: 1,
-},
-modeSliderRight: {
-  left: '50%',  
-  right: 4,       
-},
-  modeOption: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 999,
-    zIndex: 2,
+  dropdown: {
+    position: 'absolute',
+    top: 40,
+    left: 0,
+    right: 0,
+    backgroundColor: '#000000',
+    borderRadius: 16,
+    overflow: 'hidden',
+    zIndex: 1000,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: '#000000',
   },
-modeOptionText: {
-  fontSize: 14,
-  fontWeight: '700',
-  color: '#6b7280',
-},
-modeOptionActive: {
-  color: '#1f2937',
-  fontWeight: '700',
-},
+  dropdownItem: {
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    backgroundColor: '#e5e7eb',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#c2ff6b',
+  },
+  dropdownItemText: {
+    fontSize: 16,
+    color: '#000000',
+    fontWeight: '400',
+    fontFamily: 'Inter-Regular',
+  },
+  dropdownItemTextActive: {
+    color: '#000000',
+  },
+  dropdownDivider: {
+    height: 1,
+    backgroundColor: '#000000',
+  },
   content: {
     flex: 1,
+    backgroundColor: '#f3f4f6',
   },
-  scrollContent: {
+  filterHeaderRow: {
+    paddingTop: 25,
+    paddingBottom: 30,
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  filterHeaderText: {
+    fontSize: 16,
+    color: '#1f2937',
+    fontWeight: '400',
+    fontFamily: 'Inter-Regular',
+  },
+  filterHeaderIcon: {
+    padding: 4,
+  },
+  listContent: {
     paddingHorizontal: 20,
     paddingBottom: 100,
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1f2937',
-    marginBottom: 16,
-  },
-  sectionHeader: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#6b7280',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  requestCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 16,
+  card: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
     padding: 20,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
+    marginBottom: 24,
+    height: 176,
     position: 'relative',
+
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  deniedCard: {
-    opacity: 0.6,
+  inactiveCard: {
+    backgroundColor: '#f9fafb',
   },
-  statusBubble: {
+  senderPill: {
+    position: 'absolute',
+    top: -12,
+    left: 16,
+    backgroundColor: APP_PURPLE,
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    zIndex: 10,
+    maxWidth: SCREEN_WIDTH - 120,
+  },
+  inactivePill: {
+    backgroundColor: '#e5e7eb',
+    borderColor: '#9ca3af',
+  },
+  pillText: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '400',
+    fontFamily: 'Inter-Regular',
+  },
+  menuButton: {
     position: 'absolute',
     top: 16,
     right: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 16,
+    padding: 8,
+    zIndex: 20,
   },
-  statusPending: {
-    backgroundColor: '#d1d5db',
+  cardContent: {
+    flex: 1,
+    paddingTop: 22,
+    paddingRight: 60,
+    justifyContent: 'space-between',
   },
-  statusDenied: {
-    backgroundColor: '#d1d5db',
-    opacity: 0.6,
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '500',
+    color: '#1f2937',
+    marginBottom: 2,
+    lineHeight: 24,
+    fontFamily: 'Inter-Medium',
+  },
+  inactiveText: {
+    color: '#6b7280',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  statusDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: APP_PURPLE,
+  },
+  pendingStatusDot: {
+    backgroundColor: APP_PURPLE,
+  },
+  completedStatusDot: {
+    backgroundColor: '#16a34a',
+  },
+  deniedStatusDot: {
+    backgroundColor: DENIED_COLOR,
+  },
+  inactiveStatusDot: {
+    backgroundColor: '#9ca3af',
   },
   statusText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1f2937',
-    textTransform: 'lowercase',
-  },
-  requestInfo: {
-    marginBottom: 16,
-  },
-  requestTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1f2937',
-    marginBottom: 8,
-  },
-  requestDivider: {
-    height: 1,
-    backgroundColor: '#e5e7eb',
-    marginBottom: 8,
-  },
-  requestDetail: {
     fontSize: 14,
-    fontWeight: '500',
-    color: '#6b7280',
-    marginBottom: 8,
+    color: '#1f2937',
+    fontWeight: '400',
+    fontFamily: 'Inter-Regular',
   },
-  buttonRow: {
+  inactiveStatusText: {
+    color: '#6b7280',
+  },
+  metadataRow: {
     flexDirection: 'row',
     gap: 8,
   },
-  actionButton: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 999,
+  metadataPill: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#e5e7eb',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
   },
-  primaryButton: {
-    backgroundColor: '#FFD66B',
-  },
-  primaryButtonText: {
+  metadataText: {
     fontSize: 14,
-    fontWeight: '600',
-    color: '#1f2937',
+    color: '#6b7280',
+    fontWeight: '400',
+    fontFamily: 'Inter-Regular',
   },
-  secondaryButton: {
-    backgroundColor: '#d1d5db',
+  arrowButton: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: APP_PURPLE,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  secondaryButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1f2937',
-  },
-  reportButton: {
-    backgroundColor: '#ff9aa2',
-  },
-  reportButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
+  arrowButtonDimmed: {
+    backgroundColor: '#e5e7eb',
   },
   emptyState: {
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 60,
+    justifyContent: 'center',
+    padding: 40,
+    marginTop: 60,
   },
-  emptyText: {
-    fontSize: 16,
+  emptyIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginBottom: 8,
+    fontFamily: 'Inter-Bold',
+  },
+  emptySubtitle: {
+    fontSize: 14,
     color: '#6b7280',
     textAlign: 'center',
+    fontWeight: '500',
+    fontFamily: 'Inter-Medium',
   },
-  cameraContainer: {
-    flex: 1,
+  fullScreenOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent',
+    zIndex: 40,
   },
-  camera: {
-    flex: 1,
-  },
-  cameraControls: {
+  popupMenuCentered: {
     position: 'absolute',
-    bottom: 50,
-    left: 0,
-    right: 0,
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -80 }, { translateY: -50 }],
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 6,
+    minWidth: 200,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    zIndex: 50,
+  },
+  popupMenuItem: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
     alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
   },
-  cameraButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: 25,
+  popupMenuItemBorderTop: {
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
   },
-  cameraButtonText: {
-    color: 'white',
+  popupMenuText: {
     fontSize: 16,
-    fontWeight: '600',
-  },
-  captureButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'white',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  captureButtonText: {
-    fontSize: 30,
+    color: '#374151',
+    fontWeight: '500',
+    fontFamily: 'Inter-Medium',
   },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
   },
   modalContent: {
-    backgroundColor: 'white',
+    backgroundColor: '#ffffff',
     borderRadius: 20,
     padding: 24,
-    minWidth: 280,
-    maxWidth: '90%',
+    width: '100%',
+    maxWidth: 400,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: '700',
     color: '#1f2937',
-    textAlign: 'center',
-    marginBottom: 16,
+    fontFamily: 'Inter-Bold',
   },
-  modalMessage: {
+  modalCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalSubtext: {
     fontSize: 14,
     color: '#6b7280',
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 20,
+    marginBottom: 16,
+    fontWeight: '500',
+    fontFamily: 'Inter-Medium',
   },
   modalButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
+    paddingVertical: 14,
     borderRadius: 999,
-    marginBottom: 8,
     alignItems: 'center',
+    marginBottom: 12,
   },
-  confirmButton: {
-    backgroundColor: '#ff9aa2',
+  modalSubmitButton: {
+    backgroundColor: '#7b3ff2',
   },
-  confirmButtonText: {
+  modalSubmitButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: 'Inter-Bold',
+  },
+  modalCancelButton: {
+    backgroundColor: '#f3f4f6',
+  },
+  modalCancelButtonText: {
+    color: '#374151',
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
-  },
-  cancelButton: {
-    backgroundColor: '#f1f5f9',
-  },
-  cancelButtonText: {
-    fontSize: 16,
-    color: '#64748b',
+    fontFamily: 'Inter-SemiBold',
   },
   reportInput: {
-    borderWidth: 2,
+    borderWidth: 1,
     borderColor: '#e5e7eb',
-    borderRadius: 8,
+    borderRadius: 12,
     padding: 12,
     fontSize: 14,
-    minHeight: 80,
+    minHeight: 100,
+    textAlignVertical: 'top',
+    marginBottom: 20,
+    color: '#1f2937',
+    fontWeight: '500',
+    fontFamily: 'Inter-Medium',
+  },
+  filterOptions: {
+    gap: 12,
+  },
+  filterOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: '#f9fafb',
+  },
+  filterOptionActive: {
+    backgroundColor: '#000000',
+  },
+  filterOptionLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  filterOptionRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  filterDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  filterOptionText: {
+    fontSize: 16,
+    color: '#374151',
+    fontWeight: '600',
+    fontFamily: 'Inter-SemiBold',
+  },
+  filterCountCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterCount: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '600',
+    fontFamily: 'Inter-SemiBold',
+  },
+  clearFiltersButton: {
+    marginTop: 16,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  clearFiltersText: {
+    fontSize: 14,
+    color: '#6b7280',
+    fontWeight: '600',
+    fontFamily: 'Inter-SemiBold',
+  },
+  // Skeleton styles
+  skeletonPill: {
+    position: 'absolute',
+    top: -12,
+    left: 16,
+    width: 120,
+    height: 32,
+    backgroundColor: '#e5e7eb',
+    borderRadius: 20,
+  },
+  skeletonTitle: {
+    height: 20,
+    backgroundColor: '#e5e7eb',
+    borderRadius: 4,
+    marginTop: 32,
     marginBottom: 16,
+    width: '70%',
+  },
+  skeletonLine: {
+    height: 14,
+    backgroundColor: '#e5e7eb',
+    borderRadius: 4,
+    marginBottom: 12,
+    width: '100%',
+  },
+  skeletonButton: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#e5e7eb',
   },
 });

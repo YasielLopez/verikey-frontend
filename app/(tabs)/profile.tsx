@@ -1,16 +1,37 @@
-import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { useAuth } from '@/contexts/AuthContext';
+import { KYCAPI, ProfileAPI } from '@/services/api';
+import { processProfilePhotoForUpload } from '@/services/imageUtils';
+import { useFocusEffect } from '@react-navigation/native';
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
 import {
+  Bell,
+  Camera,
+  ChevronRight,
+  HelpCircle,
+  LogOut,
+  MessageCircle,
+  Moon,
+  Shield,
+  Trash2,
+  UserCheck,
+  X
+} from 'lucide-react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
   Alert,
+  Image,
   Modal,
   ScrollView,
+  StatusBar,
   StyleSheet,
+  Text,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 interface ToggleProps {
   isOn: boolean;
@@ -18,469 +39,849 @@ interface ToggleProps {
 }
 
 const Toggle: React.FC<ToggleProps> = ({ isOn, onToggle }) => (
-  <TouchableOpacity 
-    style={[styles.toggle, isOn && styles.toggleActive]} 
+  <TouchableOpacity
+    style={[styles.toggle, isOn && styles.toggleActive]}
     onPress={onToggle}
+    activeOpacity={0.9}
   >
-    <View style={[styles.toggleSlider, isOn && styles.toggleSliderActive]} />
+    <View style={[styles.toggleKnob, isOn && styles.toggleKnobActive]} />
   </TouchableOpacity>
 );
 
+interface MenuOptionProps {
+  icon: React.ReactNode;
+  title: string;
+  showToggle?: boolean;
+  toggleValue?: boolean;
+  onPress: () => void;
+  description?: string;
+  textColor?: string;
+  isLast?: boolean;
+}
+
+const MenuOption: React.FC<MenuOptionProps> = ({
+  icon,
+  title,
+  showToggle = false,
+  toggleValue = false,
+  onPress,
+  description,
+  textColor,
+  isLast = false
+}) => {
+  return (
+    <View>
+      <TouchableOpacity
+        style={styles.menuItem}
+        onPress={onPress}
+        activeOpacity={0.7}
+      >
+        <View style={styles.menuLeft}>
+          <View style={styles.menuIconContainer}>
+            {icon}
+          </View>
+          <Text style={[styles.menuText, textColor && { color: textColor }]}>
+            {title}
+          </Text>
+        </View>
+        {showToggle ? (
+          <Toggle isOn={toggleValue} onToggle={onPress} />
+        ) : (
+          <ChevronRight size={20} color="#9ca3af" />
+        )}
+      </TouchableOpacity>
+      {description && toggleValue && (
+        <Text style={styles.menuDescription}>{description}</Text>
+      )}
+      {!isLast && <View style={styles.menuItemSeparator} />}
+    </View>
+  );
+};
+
 export default function ProfileScreen() {
-  const { user, logout } = useAuth();
+  const { user, logout, refreshUser } = useAuth();
   const router = useRouter();
+  const [loading, setLoading] = useState(false);
+  const [verificationStatus, setVerificationStatus] = useState<any>(null);
+  const [profilePhotoUri, setProfilePhotoUri] = useState<string | null>(null);
+
+  // Settings state
   const [notifications, setNotifications] = useState(true);
   const [autoDelete, setAutoDelete] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
+
+  // Modal states
   const [showSignOutModal, setShowSignOutModal] = useState(false);
+  const [showPhotoModal, setShowPhotoModal] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadUserProfile();
+      checkVerificationStatus();
+    }, [])
+  );
+
+  const loadUserProfile = async () => {
+    try {
+      await refreshUser();
+    } catch (error) {
+      console.error('Failed to refresh user profile:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const checkVerificationStatus = async () => {
+    try {
+      const status = await KYCAPI.getVerificationStatus();
+      setVerificationStatus(status);
+    } catch (error) {
+      console.error('Failed to check verification status:', error);
+    }
+  };
+
+  const handlePhotoAction = async (action: string) => {
+    setShowPhotoModal(false);
+
+    switch (action) {
+      case 'camera':
+        await takeProfilePhoto();
+        break;
+      case 'gallery':
+        await pickProfilePhoto();
+        break;
+      case 'remove':
+        await removeProfilePhoto();
+        break;
+    }
+  };
+
+  const removeProfilePhoto = async () => {
+    try {
+      setProfilePhotoUri(null);
+      await ProfileAPI.updateProfilePhoto(null);
+      await refreshUser();
+      Alert.alert('Success', 'Profile photo removed!');
+    } catch (error) {
+      console.error('Failed to remove photo:', error);
+      Alert.alert('Error', 'Failed to remove photo. Please try again.');
+    }
+  };
+
+  const takeProfilePhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Camera permission is required to take photos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      try {
+        const processedPhoto = await processProfilePhotoForUpload(result.assets[0].uri);
+        setProfilePhotoUri(processedPhoto);
+        await ProfileAPI.updateProfilePhoto(processedPhoto);
+        await refreshUser();
+        Alert.alert('Success', 'Profile photo updated!');
+      } catch (error) {
+        console.error('Failed to process photo:', error);
+        Alert.alert('Error', 'Failed to update photo. Please try again.');
+      }
+    }
+  };
+
+  const pickProfilePhoto = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Photo library permission is required.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      try {
+        const processedPhoto = await processProfilePhotoForUpload(result.assets[0].uri);
+        setProfilePhotoUri(processedPhoto);
+        await ProfileAPI.updateProfilePhoto(processedPhoto);
+        await refreshUser();
+        Alert.alert('Success', 'Profile photo updated!');
+      } catch (error) {
+        console.error('Failed to process photo:', error);
+        Alert.alert('Error', 'Failed to update photo. Please try again.');
+      }
+    }
+  };
+
+  const handleGetVerified = async () => {
+    if (!verificationStatus) {
+      Alert.alert('Please wait', 'Checking verification status...');
+      return;
+    }
+
+    if (verificationStatus.verified) {
+      Alert.alert(
+        'Already Verified ✅',
+        'Your account is already verified! Your name and age are locked to your account.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    router.push('/kyc-verification');
+  };
 
   const handleMenuPress = (option: string) => {
-    Alert.alert(option, `Opening ${option} settings...`);
+    switch (option) {
+      case 'Account Information':
+        router.push('/edit-profile');
+        break;
+      case 'Privacy & Security':
+        Alert.alert('Privacy & Security', 'Privacy settings will be available in the next update');
+        break;
+      case 'Notifications':
+        setNotifications(!notifications);
+        break;
+      case 'Auto-Delete Keys':
+        setAutoDelete(!autoDelete);
+        break;
+      case 'Dark Mode':
+        setDarkMode(!darkMode);
+        break;
+      case 'Help & FAQ':
+        Alert.alert('Help & FAQ', 'Help documentation will be available in the next update.');
+        break;
+      case 'Contact Support':
+        Alert.alert('Contact Support', 'You can reach our support team at support@verikey.com');
+        break;
+      case 'Sign Out':
+        setShowSignOutModal(true);
+        break;
+    }
   };
 
-  const handleSignOut = () => {
-    setShowSignOutModal(true);
+  const confirmSignOut = async () => {
+    setIsSigningOut(true);
+    try {
+      await logout();
+      router.replace('/(auth)/login');
+    } catch (error) {
+      console.error('Sign out error:', error);
+      Alert.alert('Error', 'Failed to sign out. Please try again.');
+    } finally {
+      setIsSigningOut(false);
+      setShowSignOutModal(false);
+    }
   };
 
-  const confirmSignOut = () => {
-    setShowSignOutModal(false);
-    logout();
-    router.replace('/(auth)/login');
+  const getDisplayName = () => {
+    if (user?.first_name && user?.last_name) {
+      return `${user.first_name} ${user.last_name}`;
+    } else if (user?.first_name) {
+      return user.first_name;
+    } else if (user?.email) {
+      return user.email.split('@')[0];
+    }
+    return 'User';
   };
 
-  const MenuIcon = ({ name }: { name: string }) => (
-    <View style={styles.menuIcon}>
-      <ThemedText style={styles.menuIconText}>•</ThemedText>
-    </View>
-  );
+  const getDisplayHandle = () => {
+    if (user?.screen_name) {
+      return user.screen_name;
+    } else if (user?.email) {
+      return user.email.split('@')[0];
+    }
+    return 'user';
+  };
 
-  const ArrowIcon = () => (
-    <ThemedText style={styles.arrowIcon}>›</ThemedText>
-  );
+  const getAvatarInitial = () => {
+    if (user?.first_name) {
+      return user.first_name.charAt(0).toUpperCase();
+    } else if (user?.email) {
+      return user.email.charAt(0).toUpperCase();
+    }
+    return 'U';
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000000' }}>
+        <StatusBar barStyle="light-content" backgroundColor="#000000" />
+        <ThemedView style={styles.container}>
+          <View style={styles.header}>
+            <View style={styles.headerContent}>
+              <View style={styles.dropdownSection}>
+                <View style={styles.dropdownButton}>
+                  <Text style={styles.headerTitle}>Profile</Text>
+                </View>
+              </View>
+              <TouchableOpacity style={styles.headerIconButton} disabled>
+                <Bell size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#c2ff6b" />
+          </View>
+        </ThemedView>
+      </SafeAreaView>
+    );
+  }
+
+  const hasProfileImage = profilePhotoUri || (user?.profile_image_url && user.profile_image_url.trim() !== '');
 
   return (
-    <ThemedView style={styles.container}>
-      <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>Profile</ThemedText>
-      </View>
-      
-      <ScrollView 
-        style={styles.content} 
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 100 }}
-      >
-        {/* Profile Header */}
-        <View style={styles.profileHeader}>
-          <View style={styles.avatar}>
-            <ThemedText style={styles.avatarText}>
-              {user?.first_name?.charAt(0).toUpperCase() || 
-               user?.email?.charAt(0).toUpperCase() || 'A'}
-            </ThemedText>
-          </View>
-          <ThemedText style={styles.userName}>
-            {user?.first_name && user?.last_name 
-              ? `${user.first_name} ${user.last_name}`
-              : user?.email || 'Anna Doe'}
-          </ThemedText>
-          <ThemedText style={styles.userHandle}>
-            @{user?.screen_name || 'Annadoe92'}
-          </ThemedText>
-        </View>
-
-        {/* Account Section */}
-        <View style={styles.section}>
-          <ThemedText style={styles.sectionTitle}>Account</ThemedText>
-          
-          <TouchableOpacity 
-            style={styles.menuItem}
-            onPress={() => handleMenuPress('Personal Information')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="person" />
-              <ThemedText style={styles.menuText}>Personal Information</ThemedText>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#000000' }}>
+      <StatusBar barStyle="light-content" backgroundColor="#000000" />
+      <ThemedView style={styles.container}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.headerContent}>
+            <View style={styles.dropdownSection}>
+              <View style={styles.dropdownButton}>
+                <Text style={styles.headerTitle}>Profile</Text>
+              </View>
             </View>
-            <ArrowIcon />
-          </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={styles.menuItem}
-            onPress={() => handleMenuPress('Verification Data')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="verified" />
-              <ThemedText style={styles.menuText}>Verification Data</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.menuItem, styles.lastMenuItem]}
-            onPress={() => handleMenuPress('Privacy & Security')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="lock" />
-              <ThemedText style={styles.menuText}>Privacy & Security</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-        </View>
-
-        {/* Preferences Section */}
-        <View style={styles.section}>
-          <ThemedText style={styles.sectionTitle}>Preferences</ThemedText>
-          
-          <View style={styles.settingItem}>
-            <View style={styles.settingLeft}>
-              <ThemedText style={styles.settingTitle}>Notifications</ThemedText>
-              <ThemedText style={styles.settingDescription}>Get notified about key activity</ThemedText>
-            </View>
-            <Toggle isOn={notifications} onToggle={() => setNotifications(!notifications)} />
-          </View>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingLeft}>
-              <ThemedText style={styles.settingTitle}>Auto-delete expired keys</ThemedText>
-              <ThemedText style={styles.settingDescription}>Remove old keys automatically</ThemedText>
-            </View>
-            <Toggle isOn={autoDelete} onToggle={() => setAutoDelete(!autoDelete)} />
-          </View>
-
-          <View style={[styles.settingItem, styles.lastSettingItem]}>
-            <View style={styles.settingLeft}>
-              <ThemedText style={styles.settingTitle}>Dark mode</ThemedText>
-              <ThemedText style={styles.settingDescription}>Use dark theme</ThemedText>
-            </View>
-            <Toggle isOn={darkMode} onToggle={() => setDarkMode(!darkMode)} />
-          </View>
-        </View>
-
-        {/* Support Section */}
-        <View style={styles.section}>
-          <ThemedText style={styles.sectionTitle}>Support</ThemedText>
-          
-          <TouchableOpacity 
-            style={styles.menuItem}
-            onPress={() => handleMenuPress('Help & FAQ')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="help" />
-              <ThemedText style={styles.menuText}>Help & FAQ</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.menuItem}
-            onPress={() => handleMenuPress('Contact Support')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="mail" />
-              <ThemedText style={styles.menuText}>Contact Support</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.menuItem, styles.lastMenuItem]}
-            onPress={() => handleMenuPress('About VeriKey')}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="info" />
-              <ThemedText style={styles.menuText}>About VeriKey</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-        </View>
-
-        {/* Sign Out Section */}
-        <View style={styles.signOutSection}>
-          <TouchableOpacity 
-            style={styles.signOutItem}
-            onPress={handleSignOut}
-          >
-            <View style={styles.menuLeft}>
-              <MenuIcon name="logout" />
-              <ThemedText style={styles.signOutText}>Sign Out</ThemedText>
-            </View>
-            <ArrowIcon />
-          </TouchableOpacity>
-        </View>
-
-        {/* Footer */}
-        <View style={styles.footer}>
-          <ThemedText style={styles.footerText}>VeriKey v2.1.0</ThemedText>
-          <ThemedText style={styles.footerText}>© 2025 VeriKey Inc.</ThemedText>
-        </View>
-      </ScrollView>
-
-      {/* Sign Out Confirmation Modal */}
-      <Modal visible={showSignOutModal} transparent animationType="slide">
-        <ThemedView style={styles.modalOverlay}>
-          <ThemedView style={styles.modalContent}>
-            <ThemedText style={styles.modalTitle}>Sign Out</ThemedText>
-            <ThemedText style={styles.modalMessage}>
-              Are you sure you want to sign out?
-            </ThemedText>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.signOutButton]}
-              onPress={confirmSignOut}
-            >
-              <ThemedText style={styles.signOutButtonText}>Sign Out</ThemedText>
+            <TouchableOpacity style={styles.headerIconButton} onPress={() => {}}>
+              <Bell size={20} color="#ffffff" />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modalButton, styles.cancelButton]}
-              onPress={() => setShowSignOutModal(false)}
-            >
-              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
-            </TouchableOpacity>
-          </ThemedView>
-        </ThemedView>
-      </Modal>
-    </ThemedView>
+          </View>
+        </View>
+
+        {/* Content */}
+        <View style={styles.content}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.scrollContent}
+          >
+            {/* Profile Header */}
+            <View style={styles.profileCard}>
+              <View style={styles.profileContent}>
+                {/* Avatar */}
+                <TouchableOpacity onPress={() => setShowPhotoModal(true)} style={styles.avatarContainer}>
+                  <View style={styles.avatar}>
+                    {hasProfileImage ? (
+                      <Image
+                        source={{ uri: profilePhotoUri || user?.profile_image_url }}
+                        style={styles.avatarImage}
+                      />
+                    ) : (
+                      <Text style={styles.avatarText}>{getAvatarInitial()}</Text>
+                    )}
+                  </View>
+                  <View style={styles.cameraOverlay}>
+                    <Camera size={16} color="#fff" />
+                  </View>
+                </TouchableOpacity>
+
+                {/* User Info */}
+                <View style={styles.userInfo}>
+                  <Text style={styles.userName}>{getDisplayName()}</Text>
+                  <Text style={styles.userHandle}>{getDisplayHandle()}</Text>
+
+                  {/* Get Verified Button */}
+                  <TouchableOpacity
+                    style={styles.getVerifiedButton}
+                    onPress={handleGetVerified}
+                    activeOpacity={0.9}
+                  >
+                    <Text style={styles.getVerifiedText}>Get Verified</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+
+            {/* Account Section */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Account</Text>
+              <MenuOption
+                icon={<UserCheck size={16} color="#6b7280" />}
+                title="Account Information"
+                onPress={() => handleMenuPress('Account Information')}
+              />
+              <MenuOption
+                icon={<Shield size={16} color="#6b7280" />}
+                title="Privacy & Security"
+                onPress={() => handleMenuPress('Privacy & Security')}
+                isLast={true}
+              />
+            </View>
+
+            {/* Settings Section */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Settings</Text>
+              <MenuOption
+                icon={<Bell size={16} color="#6b7280" />}
+                title="Notifications"
+                showToggle={true}
+                toggleValue={notifications}
+                onPress={() => handleMenuPress('Notifications')}
+              />
+              <MenuOption
+                icon={<Trash2 size={16} color="#6b7280" />}
+                title="Auto-Delete Keys"
+                showToggle={true}
+                toggleValue={autoDelete}
+                onPress={() => handleMenuPress('Auto-Delete Keys')}
+                description="Old keys will be deleted after 7 days"
+              />
+              <MenuOption
+                icon={<Moon size={16} color="#6b7280" />}
+                title="Dark Mode"
+                showToggle={true}
+                toggleValue={darkMode}
+                onPress={() => handleMenuPress('Dark Mode')}
+                isLast={true}
+              />
+            </View>
+
+            {/* Support Section */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Support</Text>
+              <MenuOption
+                icon={<HelpCircle size={16} color="#6b7280" />}
+                title="Help & FAQ"
+                onPress={() => handleMenuPress('Help & FAQ')}
+              />
+              <MenuOption
+                icon={<MessageCircle size={16} color="#6b7280" />}
+                title="Contact Support"
+                onPress={() => handleMenuPress('Contact Support')}
+                isLast={true}
+              />
+            </View>
+
+            {/* Sign Out Section */}
+            <View style={styles.section}>
+              <MenuOption
+                icon={<LogOut size={16} color="#000" />}
+                title="Sign Out"
+                onPress={() => handleMenuPress('Sign Out')}
+                textColor="#000"
+                isLast={true}
+              />
+            </View>
+          </ScrollView>
+        </View>
+
+        <Modal visible={showPhotoModal} transparent animationType="fade">
+          <View style={styles.modalOverlay}>
+            <View style={styles.photoModalContent}>
+              <View style={styles.photoModalButtons}>
+                <TouchableOpacity
+                  style={[styles.photoModalButton, styles.photoModalButtonBlack]}
+                  onPress={() => handlePhotoAction('camera')}
+                  activeOpacity={0.9}
+                >
+                  <Camera size={16} color="#ffffff" />
+                  <Text style={styles.photoModalButtonTextWhite}>Take Photo</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.photoModalButton, styles.photoModalButtonBlack]}
+                  onPress={() => handlePhotoAction('gallery')}
+                  activeOpacity={0.9}
+                >
+                  <Text style={styles.photoModalButtonTextWhite}>Choose from Gallery</Text>
+                </TouchableOpacity>
+
+                {hasProfileImage && (
+                  <TouchableOpacity
+                    style={[styles.photoModalButton, styles.photoModalButtonBlack]}
+                    onPress={() => handlePhotoAction('remove')}
+                    activeOpacity={0.9}
+                  >
+                    <Trash2 size={16} color="#ffffff" />
+                    <Text style={styles.photoModalButtonTextWhite}>Remove Photo</Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity
+                  style={[styles.photoModalButton, styles.photoModalButtonCancel]}
+                  onPress={() => setShowPhotoModal(false)}
+                  activeOpacity={0.9}
+                >
+                  <X size={16} color="#111827" />
+                  <Text style={styles.photoModalButtonTextBlack}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Sign Out Modal */}
+        <Modal visible={showSignOutModal} transparent animationType="fade">
+          <View style={styles.modalOverlay}>
+            <View style={styles.signOutModalContent}>
+              <View style={styles.signOutModalHeader}>
+                <View style={styles.signOutModalIcon}>
+                  <LogOut size={20} color="#111827" />
+                </View>
+                <Text style={styles.signOutModalTitle}>Sign Out?</Text>
+              </View>
+
+              <Text style={styles.signOutModalDescription}>
+                Are you sure you want to sign out of your Verikey account?
+              </Text>
+
+              <View style={styles.signOutModalButtons}>
+                <TouchableOpacity
+                  style={[styles.signOutModalButton, styles.signOutModalButtonBlack]}
+                  onPress={confirmSignOut}
+                  disabled={isSigningOut}
+                  activeOpacity={0.9}
+                >
+                  {isSigningOut ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <LogOut size={16} color="#ffffff" />
+                      <Text style={styles.signOutModalButtonTextWhite}>Sign Out</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.signOutModalButton, styles.signOutModalButtonCancel]}
+                  onPress={() => setShowSignOutModal(false)}
+                  disabled={isSigningOut}
+                  activeOpacity={0.9}
+                >
+                  <X size={16} color="#111827" />
+                  <Text style={styles.signOutModalButtonTextBlack}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </ThemedView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  // App shells
   container: {
     flex: 1,
-    backgroundColor: '#fdfdfd',
+    backgroundColor: '#000000',
   },
+
+  // Header
   header: {
-    backgroundColor: '#b5ead7',
-    paddingTop: 60,
-    paddingBottom: 20,
+    backgroundColor: '#000000',
+    paddingTop: 10,
+    paddingBottom: 24,
     paddingHorizontal: 20,
+  },
+  headerContent: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownSection: {
+    flex: 1,
+    marginRight: 16,
+  },
+  dropdownButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingLeft: 20,
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontWeight: '400',
+    color: '#ffffff',
+    fontFamily: 'Poppins-Regular',
   },
+  headerIconButton: {
+    padding: 6,
+  },
+
+  // Content
   content: {
     flex: 1,
-    paddingHorizontal: 20,
+    backgroundColor: '#f3f4f6',
   },
-  profileHeader: {
+  scrollContent: {
+    paddingTop: 32,
+    paddingHorizontal: 20,
+    paddingBottom: 140,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 20,
-    marginBottom: 20,
+    backgroundColor: '#f3f4f6',
+  },
+
+  // Profile Header Card
+  profileCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 24,
+  },
+  profileContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  avatarContainer: {
+    position: 'relative',
   },
   avatar: {
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: '#b5ead7',
-    alignItems: 'center',
+    backgroundColor: '#f3f4f6',
     justifyContent: 'center',
-    marginBottom: 12,
-    shadowColor: '#b5ead7',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 4,
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: 80,
+    height: 80,
   },
   avatarText: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontSize: 28,
+    color: '#6b7280',
+  },
+  cameraOverlay: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#000000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  userInfo: {
+    flex: 1,
   },
   userName: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontSize: 18,
+    color: '#111827',
     marginBottom: 4,
   },
   userHandle: {
     fontSize: 16,
     color: '#6b7280',
-    fontWeight: '500',
-  },
-  section: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f2937',
     marginBottom: 12,
   },
+  getVerifiedButton: {
+    backgroundColor: '#c2ff6b',
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 999,
+    alignSelf: 'flex-start',
+  },
+  getVerifiedText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#111827',
+  },
+
+  // Sections
+  section: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    marginBottom: 24,
+    overflow: 'hidden',
+  },
+  sectionTitle: {
+    fontSize: 18,
+    color: '#111827',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+
+  // Menu Items
   menuItem: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
+    justifyContent: 'space-between',
+    padding: 16,
   },
-  lastMenuItem: {
-    borderBottomWidth: 0,
+  menuItemSeparator: {
+    height: 1,
+    backgroundColor: '#f3f4f6',
   },
   menuLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
-  menuIcon: {
-    width: 20,
-    height: 20,
-    marginRight: 12,
-    alignItems: 'center',
+  menuIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f3f4f6',
     justifyContent: 'center',
-  },
-  menuIconText: {
-    fontSize: 16,
-    color: '#6b7280',
+    alignItems: 'center',
+    marginRight: 12,
   },
   menuText: {
     fontSize: 16,
-    fontWeight: '500',
-    color: '#1f2937',
+    color: '#111827',
   },
-  arrowIcon: {
-    fontSize: 16,
+  menuDescription: {
+    fontSize: 13,
     color: '#6b7280',
-    fontWeight: '600',
+    paddingLeft: 60,
+    paddingRight: 16,
+    paddingBottom: 12,
+    marginTop: -8,
   },
-  settingItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e7eb',
-  },
-  lastSettingItem: {
-    borderBottomWidth: 0,
-  },
-  settingLeft: {
-    flex: 1,
-  },
-  settingTitle: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#1f2937',
-    marginBottom: 2,
-  },
-  settingDescription: {
-    fontSize: 14,
-    color: '#6b7280',
-  },
+
+  // Toggle
   toggle: {
-    width: 44,
-    height: 24,
+    width: 48,
+    height: 26,
+    borderRadius: 13,
     backgroundColor: '#d1d5db',
-    borderRadius: 50,
-    padding: 2,
-    justifyContent: 'center',
+    padding: 3,
   },
   toggleActive: {
-    backgroundColor: '#b5eac1',
+    backgroundColor: '#000000',
   },
-  toggleSlider: {
+  toggleKnob: {
     width: 20,
     height: 20,
-    backgroundColor: 'white',
     borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    backgroundColor: '#ffffff',
   },
-  toggleSliderActive: {
-    transform: [{ translateX: 20 }],
+  toggleKnobActive: {
+    transform: [{ translateX: 22 }],
   },
-  signOutSection: {
-    backgroundColor: 'rgba(255, 255, 255, 1)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+
+  photoModalContent: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 24,
     borderWidth: 1,
     borderColor: '#e5e7eb',
   },
-  signOutItem: {
+  photoModalButtons: {
+    gap: 12,
+  },
+  photoModalButton: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
     paddingVertical: 16,
+    paddingHorizontal: 34,
+    borderRadius: 12,
+    borderWidth: 1,
   },
-  signOutText: {
+  photoModalButtonBlack: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  photoModalButtonTextWhite: {
     fontSize: 16,
-    fontWeight: '500',
-    color: '#ff9aa2',
+    color: '#ffffff',
   },
-  footer: {
+  photoModalButtonCancel: {
+    backgroundColor: '#e5e7eb',
+    borderColor: '#e5e7eb',
+  },
+  photoModalButtonTextBlack: {
+    fontSize: 16,
+    color: '#111827',
+  },
+
+  signOutModalContent: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#ffffff', 
+    borderRadius: 20,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  signOutModalHeader: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 20,
-    marginBottom: 20,
+    gap: 12,
+    marginBottom: 16,
   },
-  footerText: {
-    fontSize: 13,
-    color: '#6b7280',
-    marginBottom: 2,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  signOutModalIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.06)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  modalContent: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 24,
-    minWidth: 280,
-    maxWidth: '90%',
-  },
-  modalTitle: {
+  signOutModalTitle: {
     fontSize: 18,
-    fontWeight: '700',
-    color: '#1f2937',
-    textAlign: 'center',
-    marginBottom: 16,
+    color: '#111827',
+    fontWeight: '500',
   },
-  modalMessage: {
+  signOutModalDescription: {
     fontSize: 14,
     color: '#6b7280',
-    textAlign: 'center',
+    marginBottom: 24,
     lineHeight: 20,
-    marginBottom: 20,
   },
-  modalButton: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 999,
-    marginBottom: 8,
+  signOutModalButtons: {
+    gap: 12,
+  },
+  signOutModalButton: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 34,
+    borderRadius: 12,
+    borderWidth: 1,
   },
-  signOutButton: {
-    backgroundColor: '#ff9aa2',
+  signOutModalButtonBlack: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
-  signOutButtonText: {
+  signOutModalButtonCancel: {
+    backgroundColor: '#e5e7eb',
+    borderColor: '#e5e7eb',
+  },
+  signOutModalButtonTextWhite: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    color: '#ffffff',
   },
-  cancelButton: {
-    backgroundColor: '#f1f5f9',
-  },
-  cancelButtonText: {
+  signOutModalButtonTextBlack: {
     fontSize: 16,
-    color: '#64748b',
+    color: '#111827',
   },
 });
