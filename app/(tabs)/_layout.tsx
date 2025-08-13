@@ -1,14 +1,12 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { Tabs } from 'expo-router';
 import React, { useCallback, useState } from 'react';
-import { Dimensions, Platform, Text, View } from 'react-native';
+import { Platform, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HapticTab } from '@/components/HapticTab';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import { KeysAPI, RequestsAPI } from '@/services/api';
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 let KeyIcon: any, MailIcon: any, SendIcon: any, UserIcon: any;
 try {
@@ -22,8 +20,8 @@ try {
 
 const TabFallbackIcon = ({
   name,
-  size = 26,
-  color = '#B3B3B3',
+  size = 20,
+  color = '#8b8b8b',
 }: {
   name: string;
   size?: number;
@@ -45,8 +43,8 @@ const TabFallbackIcon = ({
 const SafeTabIcon = ({
   IconComponent,
   fallbackName,
-  size = 26,
-  color = '#B3B3B3',
+  size = 20,
+  color = '#8b8b8b',
 }: {
   IconComponent?: React.ComponentType<{ size: number; color: string }>;
   fallbackName: string;
@@ -93,43 +91,42 @@ const NotificationBubble = ({ count }: { count: number }) => {
     <View
       style={{
         position: 'absolute',
-        top: -3,
-        right: -3,
-        backgroundColor: '#f9f9f9',
+        top: -4,
+        right: -4,
+        backgroundColor: '#000000',
         borderRadius: 10,
-        minWidth: 18,
-        height: 18,
-        paddingHorizontal: 3,
+        minWidth: 20,
+        height: 20,
+        paddingHorizontal: 4,
         alignItems: 'center',
         justifyContent: 'center',
-        borderWidth: 2,
-        borderColor: '#000',
       }}
     >
-      <Text style={{ color: '#1F2937', fontSize: 11, fontWeight: '700' }}>
+      <Text style={{ color: '#ffffff', fontSize: 12, fontWeight: '600' }}>
         {count > 99 ? '99+' : String(count)}
       </Text>
     </View>
   );
 };
 
-const IconWrap = ({
+const TabButton = ({
   children,
   focused,
-  activeBg,
-}: React.PropsWithChildren<{ focused: boolean; activeBg: string }>) => (
+}: React.PropsWithChildren<{ focused: boolean }>) => (
   <View style={{ 
     alignItems: 'center', 
     justifyContent: 'center',
+    position: 'relative',
+    marginTop: 26,
   }}>
     <View
       style={{
-        width: 44,
-        height: 44,
+        width: 46,
+        height: 46,
         borderRadius: 22,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: focused ? activeBg : 'transparent',
+        backgroundColor: focused ? '#c2ff6b' : 'transparent',
         position: 'relative',
       }}
     >
@@ -143,13 +140,8 @@ export default function TabLayout() {
   const { bottom } = useSafeAreaInsets();
   const { newKeysCount, newRequestsCount } = useNotificationCounts();
 
-  const ACTIVE_BG = '#C2FF6B';
-  const BAR_BG = '#000';  
-  const INACTIVE = '#B3B3B3';
-  const ACTIVE_ICON = '#000';
-
-  const TAB_BAR_WIDTH = 300;
-  const TAB_BAR_HEIGHT = 64;
+  const ACTIVE_COLOR = '#1a1a1a';
+  const INACTIVE_COLOR = '#8b8b8b';
 
   return (
     <Tabs
@@ -157,55 +149,41 @@ export default function TabLayout() {
         headerShown: false,
         tabBarShowLabel: false,
         tabBarButton: HapticTab,
-        tabBarActiveTintColor: ACTIVE_BG,
-        tabBarInactiveTintColor: INACTIVE,
+        tabBarActiveTintColor: ACTIVE_COLOR,
+        tabBarInactiveTintColor: INACTIVE_COLOR,
 
         tabBarStyle: {
           position: 'absolute',
-          left: undefined,
-          right: undefined,
-          marginLeft: undefined,
-          marginRight: undefined,
-          marginHorizontal: undefined,
-          alignSelf: undefined,
-          
-          bottom: Platform.OS === 'ios' ? (16 + bottom) : 16,
-          width: TAB_BAR_WIDTH,
-          height: TAB_BAR_HEIGHT,
-          
-          marginLeft: (SCREEN_WIDTH - TAB_BAR_WIDTH) / 2,
-          
-          backgroundColor: BAR_BG,
-          borderRadius: TAB_BAR_HEIGHT / 2,
-          borderTopWidth: 0,
-          elevation: 6,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 3 },
-          shadowOpacity: 0.12,
-          shadowRadius: 8,
-          
+          bottom: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: '#ffffff',
+          borderTopWidth: 1,
+          borderTopColor: '#e5e7eb',
+          height: Platform.OS === 'ios' ? (50 + bottom) : 50,  
+          paddingBottom: Platform.OS === 'ios' ? bottom : 0,
+          paddingHorizontal: 35,
           flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-evenly',
-          paddingHorizontal: 12,
-          paddingVertical: 0,
+          alignItems: 'flex-start', 
+          justifyContent: 'space-between',
+          elevation: 8,
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: -2 },
+          shadowOpacity: 0.1,
+          shadowRadius: 8,
         },
 
         tabBarItemStyle: {
           flex: 1,
           alignItems: 'center',
-          justifyContent: 'center',
+          justifyContent: 'flex-start', 
+          paddingHorizontal: 0,
         },
 
         tabBarIconStyle: {
           margin: 0,
           padding: 0,
-          marginTop: 3,
-          marginBottom: 0,
         },
-
-        tabBarContainerStyle: undefined,
-        safeAreaInsets: undefined,
       }}
     >
       <Tabs.Screen
@@ -213,15 +191,15 @@ export default function TabLayout() {
         options={{
           title: 'Keys',
           tabBarIcon: ({ focused }) => (
-            <IconWrap focused={focused} activeBg={ACTIVE_BG}>
+            <TabButton focused={focused}>
               <SafeTabIcon
                 IconComponent={KeyIcon} 
                 fallbackName="Key"
-                size={24}
-                color={focused ? ACTIVE_ICON : INACTIVE}
+                size={26}
+                color={focused ? ACTIVE_COLOR : INACTIVE_COLOR}
               />
               <NotificationBubble count={newKeysCount} />
-            </IconWrap>
+            </TabButton>
           ),
         }}
       />
@@ -231,15 +209,15 @@ export default function TabLayout() {
         options={{
           title: 'Requests',
           tabBarIcon: ({ focused }) => (
-            <IconWrap focused={focused} activeBg={ACTIVE_BG}>
+            <TabButton focused={focused}>
               <SafeTabIcon
                 IconComponent={MailIcon}
                 fallbackName="Mail"
                 size={26}
-                color={focused ? ACTIVE_ICON : INACTIVE}
+                color={focused ? ACTIVE_COLOR : INACTIVE_COLOR}
               />
               <NotificationBubble count={newRequestsCount} />
-            </IconWrap>
+            </TabButton>
           ),
         }}
       />
@@ -249,14 +227,14 @@ export default function TabLayout() {
         options={{
           title: 'Send',
           tabBarIcon: ({ focused }) => (
-            <IconWrap focused={focused} activeBg={ACTIVE_BG}>
+            <TabButton focused={focused}>
               <SafeTabIcon
                 IconComponent={SendIcon}
                 fallbackName="Send"
                 size={26}
-                color={focused ? ACTIVE_ICON : INACTIVE}
+                color={focused ? ACTIVE_COLOR : INACTIVE_COLOR}
               />
-            </IconWrap>
+            </TabButton>
           ),
         }}
       />
@@ -266,14 +244,14 @@ export default function TabLayout() {
         options={{
           title: 'Profile',
           tabBarIcon: ({ focused }) => (
-            <IconWrap focused={focused} activeBg={ACTIVE_BG}>
+            <TabButton focused={focused}>
               <SafeTabIcon
                 IconComponent={UserIcon}
                 fallbackName="User"
                 size={26}
-                color={focused ? ACTIVE_ICON : INACTIVE}
+                color={focused ? ACTIVE_COLOR : INACTIVE_COLOR}
               />
-            </IconWrap>
+            </TabButton>
           ),
         }}
       />
